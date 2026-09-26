@@ -1094,6 +1094,38 @@ body:has(#login-screen.open) .nav-scrim { display:none !important; }
   window.addEventListener('scheduler-page-open',loadSchedules);window.addEventListener('uu-auth-ready',loadSchedules);if(window.__uu_authenticated&&csrfToken)loadSchedules();setInterval(()=>{if(!document.getElementById('scheduler-page').hidden&&csrfToken)loadSchedules()},10000);
 })();
 </script></body></html>"""
+PAGE_BYTES = PAGE.encode()
+
+
+def content_security_policy(page):
+    """Allow exactly the page's own inline scripts, identified by their hashes.
+
+    The page has no inline event handler attributes or javascript: URLs, so
+    no 'unsafe-inline' is needed for scripts: markup that reaches the DOM
+    through a rendering bug cannot execute code.
+    """
+    hashes = " ".join(
+        "'sha256-" + base64.b64encode(hashlib.sha256(body.encode()).digest()).decode() + "'"
+        for body in re.findall(r"<script>(.*?)</script>", page, re.DOTALL))
+    return ("default-src 'none'; "
+            f"script-src {hashes}; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self'; "
+            "connect-src 'self'; "
+            "base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+
+
+PAGE_CSP = content_security_policy(PAGE)
+# JSON, assets, and error pages never need to run or embed anything.
+DEFAULT_CSP = "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+SECURITY_HEADERS = (
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
+    ("Referrer-Policy", "no-referrer"),
+    ("Cross-Origin-Opener-Policy", "same-origin"),
+    ("Cross-Origin-Resource-Policy", "same-origin"),
+    ("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()"),
+)
 
 
 def error_payload(code, message):
@@ -2065,9 +2097,21 @@ class StatusHandler(BaseHTTPRequestHandler):
         if isinstance(self.connection, ssl.SSLSocket):
             self.connection.do_handshake()
 
+    def version_string(self):
+        # The default appends the Python version ("Python/3.13.5").
+        return self.server_version
+
     def send_response(self, code, message=None):
         self.response_started = True
+        self.response_csp = DEFAULT_CSP
         super().send_response(code, message)
+
+    def end_headers(self):
+        # Every response, including BaseHTTPRequestHandler.send_error() pages.
+        for name, value in SECURITY_HEADERS:
+            self.send_header(name, value)
+        self.send_header("Content-Security-Policy", getattr(self, "response_csp", DEFAULT_CSP))
+        super().end_headers()
 
     def current_session(self):
         cookie = self.headers.get("Cookie", "")
@@ -2105,8 +2149,9 @@ class StatusHandler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def send_bytes(self, body, content_type, status=HTTPStatus.OK):
+    def send_bytes(self, body, content_type, status=HTTPStatus.OK, csp=DEFAULT_CSP):
         self.send_response(status)
+        self.response_csp = csp
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
@@ -2913,7 +2958,7 @@ class StatusHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlsplit(self.path).path
         if path in ("/", "/overview", "/settings", "/scheduler"):
-            self.send_bytes(PAGE.encode(), "text/html; charset=utf-8")
+            self.send_bytes(PAGE_BYTES, "text/html; charset=utf-8", csp=PAGE_CSP)
             return
         if path in UI_ASSETS:
             filename, content_type = UI_ASSETS[path]
