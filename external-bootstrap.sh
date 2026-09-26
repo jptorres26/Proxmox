@@ -27,7 +27,9 @@ cleanup() {
   [ -z "$backup_helper" ] || rm -f "$backup_helper"
   [ -z "$backup_sudoers" ] || rm -f "$backup_sudoers"
 }
-trap cleanup EXIT HUP INT TERM
+# In sh an INT/TERM trap resumes after the handler: exit instead.
+trap cleanup EXIT
+trap 'exit 130' HUP INT TERM
 
 validate_config_file() {
   awk -F= '
@@ -52,10 +54,14 @@ if [ -z "$source_helper" ] || [ ! -f "$source_helper" ] || [ ! -r "$source_helpe
   printf 'external-bootstrap: readable helper path required\n' >&2
   exit 64
 fi
-printf '%s\n' "$target_user" | grep -Eq '^[A-Za-z_][A-Za-z0-9_.-]*$' || {
-  printf 'external-bootstrap: valid target user required\n' >&2
-  exit 64
-}
+# One user name; `printf | grep` passed when any line of a multi-line
+# argument matched, which could add lines to the sudoers fragment.
+case "$target_user" in
+  ''|ALL|[!A-Za-z_]*|*[!A-Za-z0-9_.-]*)
+    printf 'external-bootstrap: valid target user required\n' >&2
+    exit 64
+    ;;
+esac
 if [ -e "$CONFIG_PATH" ] && ! validate_config_file "$CONFIG_PATH"; then
   printf 'external-bootstrap: existing local config is invalid; refusing to replace it\n' >&2
   exit 44
@@ -78,7 +84,7 @@ if [ -e "$SUDOERS_PATH" ]; then
   had_sudoers=true
 fi
 install -o root -g root -m 0755 "$source_helper" "$temporary_helper"
-"$temporary_helper" version >/dev/null
+sh "$temporary_helper" version >/dev/null
 mv -f "$temporary_helper" "$HELPER_PATH"
 temporary_helper=""
 

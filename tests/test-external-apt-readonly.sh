@@ -136,4 +136,17 @@ EXCLUDE=""
 CONFIG
 run_check nonroot updates 1 error
 
+
+# The remote check is POSIX sh (Alpine and FreeBSD have no bash), and a
+# filtered result names the OS instead of "unknown".
+remote_check_script="$WORK_DIR/remote-check.sh"
+awk "/<<'REMOTE_CHECK'\$/ {copy=1; next} /^REMOTE_CHECK\$/ {copy=0} copy" "$ROOT_DIR/external-apt.sh" |
+  sed "s|/etc/ultimate-updater/external.conf|$WORK_DIR/external.conf|; s|/etc/os-release|$WORK_DIR/os-release|g" \
+  > "$remote_check_script"
+printf 'schema_version="1"\nONLY_UPDATE_CHECK=""\nEXCLUDE_UPDATE_CHECK="filtered-host"\nONLY=""\nEXCLUDE=""\n' > "$WORK_DIR/external.conf"
+printf 'ID=debian\nVERSION_ID="13"\nPRETTY_NAME="Debian GNU/Linux 13 (trixie)"\n' > "$WORK_DIR/os-release"
+grep -Fq "\"UU_EXTERNAL_TARGET_NAME=\$EXTERNAL_TARGET sh -s\"" "$ROOT_DIR/external-apt.sh"
+filtered=$(UU_EXTERNAL_TARGET_NAME=filtered-host dash "$remote_check_script")
+[[ "$filtered" == 'UU_RESULT|skipped|Debian GNU/Linux 13 (trixie)|13|null|null||EXTERNAL_FILTERED|excluded by local check filter' ]] ||
+  { echo "unexpected filtered result: $filtered" >&2; exit 1; }
 echo 'external apt read-only tests: PASS'

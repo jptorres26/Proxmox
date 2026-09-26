@@ -76,7 +76,9 @@ classify_ssh_error() {
 }
 
 remote_check() {
-  RUN_SSH_IDENTITY_FILE="$EXTERNAL_IDENTITY_FILE" RUN_SSH_COMMAND "$EXTERNAL_HOST" "$EXTERNAL_PORT" "$EXTERNAL_USER" "UU_EXTERNAL_TARGET_NAME=$EXTERNAL_TARGET bash -s" <<'REMOTE_CHECK'
+  RUN_SSH_IDENTITY_FILE="$EXTERNAL_IDENTITY_FILE" RUN_SSH_COMMAND "$EXTERNAL_HOST" "$EXTERNAL_PORT" "$EXTERNAL_USER" "UU_EXTERNAL_TARGET_NAME=$EXTERNAL_TARGET sh -s" <<'REMOTE_CHECK'
+# POSIX sh: Alpine or FreeBSD hosts have no bash and were reported as SSH
+# failures instead of UNSUPPORTED_OS.
 set -u
 config=/etc/ultimate-updater/external.conf
 config_value() {
@@ -124,11 +126,12 @@ if ! awk -F= '
   printf 'UU_RESULT|error|unknown|unknown|null|null||EXTERNAL_CONFIG_INVALID|local External config is invalid\n'
   exit 27
 fi
+# Read before the filter, so a skipped result names the OS.
+. /etc/os-release
 if ! filter_allows check "${UU_EXTERNAL_TARGET_NAME:-$(hostname)}"; then
   printf 'UU_RESULT|skipped|%s|%s|null|null||EXTERNAL_FILTERED|excluded by local check filter\n' "${PRETTY_NAME:-unknown}" "${VERSION_ID:-}"
   exit 0
 fi
-. /etc/os-release
 id_lower=$(printf '%s %s' "${ID:-}" "${ID_LIKE:-}" | tr '[:upper:]' '[:lower:]')
 case "$id_lower" in
   *debian*|*ubuntu*|*raspbian*) updater=apt ;;
@@ -136,7 +139,7 @@ case "$id_lower" in
   *) printf 'UU_RESULT|unsupported|%s|%s|null|null||UNSUPPORTED_OS|%s\n' "${PRETTY_NAME:-unknown}" "${VERSION_ID:-}" "${ID:-unknown}"; exit 21 ;;
 esac
 if ! command -v "$updater" >/dev/null 2>&1; then
-  printf 'UU_RESULT|error|%s|%s|null|null|%s|%s_UNAVAILABLE|%s is unavailable\n' "${PRETTY_NAME:-unknown}" "${VERSION_ID:-}" "$updater" "${updater^^}" "$updater"
+  printf 'UU_RESULT|error|%s|%s|null|null|%s|%s_UNAVAILABLE|%s is unavailable\n' "${PRETTY_NAME:-unknown}" "${VERSION_ID:-}" "$updater" "$(printf '%s' "$updater" | tr '[:lower:]' '[:upper:]')" "$updater"
   exit 24
 fi
 if [ "$updater" = apt ]; then

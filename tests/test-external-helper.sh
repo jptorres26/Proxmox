@@ -34,4 +34,12 @@ if grep -Eq '\$[@*]' "$ROOT_DIR/external-helper.sh"; then
   echo 'external helper forwards arbitrary arguments' >&2
   exit 1
 fi
+# external-bootstrap.sh writes sudoers as root, so it is checked statically:
+# one validated user name (a multi-line argument passed `printf | grep`), an
+# exit after INT/TERM (sh resumes after a trap handler), and the helper
+# probe runs through sh (noexec /tmp).
+grep -Fq "''|ALL|[!A-Za-z_]*|*[!A-Za-z0-9_.-]*)" "$ROOT_DIR/external-bootstrap.sh"
+grep -Fxq "trap 'exit 130' HUP INT TERM" "$ROOT_DIR/external-bootstrap.sh"
+# shellcheck disable=SC2016 # literal source text
+grep -Fxq 'sh "$temporary_helper" version >/dev/null' "$ROOT_DIR/external-bootstrap.sh"
 echo 'external helper validation tests: PASS'
