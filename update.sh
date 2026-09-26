@@ -1597,7 +1597,7 @@ UPDATE_CONTAINER () {
     UPDATE_CHECK
   elif [[ "$OS" =~ archlinux ]]; then
     echo -e "${OR:-}--- PACMAN UPDATE ---${CL:-}"
-    pct exec "$CONTAINER" -- bash -c "$PACMAN_ENVIRONMENT pacman -Su --noconfirm" || { ERROR_CODE=$?; ID=$CONTAINER; ERROR_MSG=$(pct exec "$CONTAINER" -- bash -c "$PACMAN_ENVIRONMENT pacman -Su --noconfirm" 2>&1); ERROR; }
+    pct exec "$CONTAINER" -- bash -c "$PACMAN_ENVIRONMENT pacman -Syu --noconfirm" || { ERROR_CODE=$?; ID=$CONTAINER; ERROR_MSG=$(pct exec "$CONTAINER" -- bash -c "$PACMAN_ENVIRONMENT pacman -Syu --noconfirm" 2>&1); ERROR; }
     if [[ $ERROR_CODE != "" ]]; then return; fi
     EXTRAS
     TRIM_FILESYSTEM
@@ -1805,7 +1805,7 @@ UPDATE_VM () {
       # Arch
       elif [[ "$OS" =~ Arch ]]; then
         echo -e "${OR:-}--- PACMAN UPDATE ---${CL:-}"
-        ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" pacman -Su --noconfirm || { ERROR_CODE=$?; ID=$VM; ERROR_MSG=$(ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" pacman -Su --noconfirm 2>&1); ERROR; }
+        ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" pacman -Syu --noconfirm || { ERROR_CODE=$?; ID=$VM; ERROR_MSG=$(ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" pacman -Syu --noconfirm 2>&1); ERROR; }
         if [[ $ERROR_CODE != "" ]]; then return; fi
         EXTRAS
         UPDATE_CHECK
@@ -1909,7 +1909,7 @@ UPDATE_VM_QEMU () {
       UPDATE_CHECK
     elif [[ "$OS" =~ Arch ]]; then
       echo -e "${OR:-}--- PACMAN UPDATE ---${CL:-}"
-      RUN_QEMU_COMMAND "$VM" -- bash -c "pacman -Su --noconfirm" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
+      RUN_QEMU_COMMAND "$VM" -- bash -c "pacman -Syu --noconfirm" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
       if [[ $ERROR_CODE != "" ]]; then return; fi
       echo
       UPDATE_CHECK
