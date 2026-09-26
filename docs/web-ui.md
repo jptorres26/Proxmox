@@ -85,6 +85,10 @@ permissions.
 - Sessions expire after 8 hours without activity and at the latest 12 hours
   after sign-in. The session cookie is `HttpOnly`, `SameSite=Strict`, and
   `Secure` when HTTPS is active.
+- Responses carry a Content Security Policy that allows only the page's own
+  inline scripts (by hash), deny framing, and disable MIME sniffing and
+  referrers. A reverse proxy in front of the Web UI must pass these headers
+  through unchanged.
 
 Useful service commands are:
 
