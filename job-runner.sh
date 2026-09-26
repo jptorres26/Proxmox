@@ -93,6 +93,29 @@ remote_ref_file() {
   printf '%s/%s.ref' "$REMOTE_REF_DIR" "$1"
 }
 
+# state_fields FILE KEY... prints the values of several keys on one line,
+# separated by the ASCII unit separator so empty values survive
+# `IFS=$'\x1f' read`. Listing jobs with one awk per key cost about 800
+# processes for 50 jobs; this reads each file once.
+state_fields() {
+  local file="$1" fd output
+  shift
+  [[ -f "$file" && -r "$file" ]] || return 1
+  exec {fd}<"$file" 2>/dev/null || return 1
+  if ! output=$(awk -F= -v keys="$*" '
+      { key = $1; sub(/^[^=]*=/, ""); if (!(key in values)) values[key] = $0 }
+      END {
+        n = split(keys, wanted, " ")
+        for (i = 1; i <= n; i++) printf "%s%s", (i > 1 ? "\037" : ""), values[wanted[i]]
+        printf "\n"
+      }' <&"$fd"); then
+    exec {fd}<&-
+    return 1
+  fi
+  exec {fd}<&-
+  printf '%s\n' "$output"
+}
+
 state_value() {
   local file="$1" key="$2" fd value
   # Retention may unlink a file after a caller has enumerated it.  Open the
@@ -805,9 +828,7 @@ refresh_running_jobs() {
   command -v systemctl >/dev/null 2>&1 || return 0
   shopt -s nullglob
   for file in "$JOB_STATE_DIR"/*.state; do
-    unit=$(state_value "$file" unit)
-    target=$(state_value "$file" target)
-    state=$(state_value "$file" state)
+    IFS=$'\x1f' read -r unit target state < <(state_fields "$file" unit target state) || continue
     if [[ "$state" == running ]]; then
       # A transient unit can be briefly invisible between the state file
       # write and systemd registering the unit.  Do not turn that startup
@@ -853,24 +874,18 @@ list_jobs() {
   [[ -d "$JOB_STATE_DIR" ]] || return 0
   refresh_running_jobs
   cleanup_completed_jobs || true
-  local file unit target state started finished exit_code owner_node owner_host port
+  local file unit target state started finished exit_code job_type job_source owner_node owner_host port
   shopt -s nullglob
   for file in "$JOB_STATE_DIR"/*.state; do
-    unit=$(state_value "$file" unit)
-    target=$(state_value "$file" target)
-    state=$(state_value "$file" state)
-    started=$(state_value "$file" started_at)
-    finished=$(state_value "$file" finished_at)
-    exit_code=$(state_value "$file" exit_code)
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t\t%s\n' "$unit" "$target" "$state" "$started" "$finished" "$exit_code" "$(state_value "$file" type)" "$(state_value "$file" source)"
+    # A file removed by retention in the meantime is skipped.
+    IFS=$'\x1f' read -r unit target state started finished exit_code job_type job_source \
+      < <(state_fields "$file" unit target state started_at finished_at exit_code type source) || continue
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t\t%s\n' "$unit" "$target" "$state" "$started" "$finished" "$exit_code" "$job_type" "$job_source"
   done
   shopt -s nullglob
   for file in "$REMOTE_REF_DIR"/*.ref; do
-    unit=$(state_value "$file" unit)
-    target=$(state_value "$file" target)
-    owner_node=$(state_value "$file" owner_node)
-    owner_host=$(state_value "$file" owner_host)
-    port=$(state_value "$file" port)
+    IFS=$'\x1f' read -r unit target owner_node owner_host port \
+      < <(state_fields "$file" unit target owner_node owner_host port) || continue
     [[ -n "$unit" && -n "$target" && -n "$owner_node" && -n "$owner_host" && -n "$port" ]] || continue
     remote_state=$(remote_state_line "$unit" "$target" "$owner_node" "$owner_host" "$port")
     printf '%s\n' "$remote_state"
