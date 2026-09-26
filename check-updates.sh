@@ -1318,7 +1318,7 @@ CHECK_VM_LIFECYCLE () {
 
 # VM Check
 CHECK_VM () {
-  local IP USER SSH_VM_PORT SSH_START_DELAY_TIME ssh_profile_configured=false ssh_error
+  local IP USER SSH_VM_PORT SSH_START_DELAY_TIME ssh_profile_configured=false ssh_error apt_rc
   REBOOT_REQUIRED=false
   if [[ -n "${1:-}" ]]; then
     VM=$1
@@ -1406,8 +1406,7 @@ CHECK_VM () {
       PKG_RC=$?
     fi
     if [[ $PKG_RC -ne 0 ]]; then
-      STATUS_MODEL_RECORD "$VM" vm ssh false "$OS" pkg "null" "null" error CHECK_COMMAND_FAILED \
-        "pkg version failed for VM $VM" "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME"
+      RECORD_SSH_CHECK_FAILURE "$PKG_RC" pkg "pkg version failed for VM $VM"
       return 1
     fi
     UPDATES=$(printf '%s\n' "$FREEBSD_PKG_LIST" | awk '$NF == "<" {count++} END {print count+0}')
@@ -1423,9 +1422,10 @@ CHECK_VM () {
   fi
   if [[ ${OS,,} =~ ubuntu|mint|kali|debian|devuan ]]; then
     RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "apt-get update" >/dev/null 2>&1
-    if ! APT_OUTPUT=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "apt-get -s --with-new-pkgs upgrade"); then
-      STATUS_MODEL_RECORD "$VM" vm ssh true "$OS" apt null null error CHECK_COMMAND_FAILED \
-        "apt-get simulation failed for VM $VM" "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME"
+    apt_rc=0
+    APT_OUTPUT=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "apt-get -s --with-new-pkgs upgrade") || apt_rc=$?
+    if [[ $apt_rc -ne 0 ]]; then
+      RECORD_SSH_CHECK_FAILURE "$apt_rc" apt "apt-get simulation failed for VM $VM"
       return 1
     fi
     READ_APT_UPDATE_COUNTS "$APT_OUTPUT"
@@ -1499,6 +1499,21 @@ CHECK_VM () {
     STATUS_MODEL_RECORD "$VM" vm ssh true "$OS" yum "${UPDATES:-0}" false "$STATUS_MODEL_STATUS" "" "" "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME" null null
   else
     STATUS_MODEL_RECORD "$VM" vm ssh true "$OS" "" "null" "null" unsupported UNSUPPORTED_OS "No supported updater detected"
+  fi
+}
+
+# A package query over SSH failed after CHECK_VM's connection probe had
+# succeeded: the guest is reachable and its package manager failed. Only ssh's
+# own exit status 255 means the connection failed. A guest recorded as not
+# reachable is counted as offline in the summary and the Web UI.
+RECORD_SSH_CHECK_FAILURE () {  # <exit status> <updater> <message>
+  local rc="$1" updater="$2" message="$3"
+  if [[ "$rc" -eq 255 ]]; then
+    STATUS_MODEL_RECORD "$VM" vm ssh false "$OS" "$updater" null null error SSH_TRANSPORT \
+      "SSH connection to VM $VM failed during the package check" "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME"
+  else
+    STATUS_MODEL_RECORD "$VM" vm ssh true "$OS" "$updater" null null error CHECK_COMMAND_FAILED \
+      "$message (exit status $rc)" "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME"
   fi
 }
 

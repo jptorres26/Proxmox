@@ -22,7 +22,7 @@ Fixed:
 - CLEAN_LOGFILE truncated the update log; failed steps ran twice; per-target state leaked into the next target
 - snapshot rotation deleted snapshots it had not created; the Docker cleanup extra removed containers and volumes
 - RPM and Arch update counts, Arch guest upgrades, FreeBSD detection over SSH, hibernated VMs (no longer resumed by a check), and unsupported guest systems are reported as such
-- a failed `apt-get -s` read as "0 updates"; `EMAIL_ONLY_SECURITY` never matched; `EXIT_ON_ERROR` did not stop the run
+- a failed `apt-get -s` read as "0 updates", and a reachable FreeBSD/pfSense guest whose `pkg` query failed was counted as offline; `EMAIL_ONLY_SECURITY` never matched; `EXIT_ON_ERROR` did not stop the run
 - VMs were shut down while a guest-agent package job or Windows installation was still running; background guest shutdowns were not waited for
 - Windows updates with license terms failed to install
 - Internal SSH overrides were ignored for VM updates; SSH port overrides leaked to the next node

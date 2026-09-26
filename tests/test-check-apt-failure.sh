@@ -37,9 +37,7 @@ run_host_check 0
 grep -Fq 'host:pve1 host local true' "$WORK_DIR/records"
 grep -Fq ' apt 1 false updates_available ' "$WORK_DIR/records"
 
-# The SSH VM path checks the simulation too.
-grep -Fq 'if ! APT_OUTPUT=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "apt-get -s --with-new-pkgs upgrade"); then' \
-  "$ROOT_DIR/check-updates.sh"
+# The SSH VM path is covered by test-vm-ssh-check-failure.sh.
 
 # Every caller counts a failed host check in the exit status.
 if grep -En '(^|[;[:space:]])CHECK_HOST_ITSELF($|;)' "$ROOT_DIR/check-updates.sh" | grep -v 'CHECK_FAILURE=1'; then
