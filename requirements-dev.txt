@@ -1,0 +1,8 @@
+# Development and CI tooling only. Ultimate Updater itself has no Python
+# dependencies beyond the standard library.
+#
+#   python3 -m pip install -r requirements-dev.txt
+#   tests/lint.sh && tests/run-all.sh
+actionlint-py==1.7.12.25
+ruff==0.16.9
+shellcheck-py==0.11.0.1

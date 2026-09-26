@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [master, beta, develop]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install lint tools
+        run: python -m pip install -r requirements-dev.txt
+      - name: ShellCheck, Ruff, and actionlint
+        run: tests/lint.sh
+
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 ships with Proxmox VE 8 (Debian 12), 3.13 with Proxmox VE 9 (Debian 13).
+        python-version: ["3.11", "3.13"]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install test tools
+        run: python -m pip install -r requirements-dev.txt
+      - name: Run tests as an unprivileged user
+        run: tests/run-all.sh
+      # Several fixtures only exercise their runtime paths as root, which is
+      # how the updater runs on a Proxmox host.
+      - name: Run tests as root
+        run: sudo env "PATH=$PATH" tests/run-all.sh

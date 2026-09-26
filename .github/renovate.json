@@ -1,6 +1,15 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:recommended"
+    "config:recommended",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "minimumReleaseAge": "3 days",
+  "packageRules": [
+    {
+      "description": "Batch CI tooling updates (workflow actions and pinned lint tools) into one pull request",
+      "matchManagers": ["github-actions", "pip_requirements"],
+      "groupName": "CI tooling"
+    }
   ]
 }
