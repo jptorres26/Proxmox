@@ -30,6 +30,34 @@ RUN_LOCAL_COMMAND() {
   "$@"
 }
 
+# Print the configured internet check as a POSIX sh command for the host or a
+# guest (run it with `sh -c`). Only ping and curl are supported and the
+# address must be a host name or IP address: both values used to be pasted
+# into `bash -c` strings on the host and in every guest, and curl was called
+# as `curl -q -c1 URL`, which wrote a cookie jar named "1".
+INTERNET_CHECK_COMMAND() {
+  local executable="${CHECK_URL_EXE:-${EXE_FOR_INTERNET_CHECK:-ping}}" url="${CHECK_URL:-}"
+  [[ "$url" =~ ^[A-Za-z0-9:][A-Za-z0-9.:-]*$ ]] || return 1
+  case "${executable##*/}" in
+    curl) printf 'curl -fsS -o /dev/null --max-time 10 %s >/dev/null 2>&1' "$url" ;;
+    *) printf 'ping -q -c1 %s >/dev/null 2>&1' "$url" ;;
+  esac
+}
+
+# Print PACMAN_ENVIRONMENT ("NAME=value NAME2=value") one assignment per line,
+# or fail when it is anything else. It used to be run as shell code.
+PACMAN_ENVIRONMENT_ASSIGNMENTS() {
+  local assignment
+  local -a assignments=()
+  read -r -a assignments <<< "${PACMAN_ENVIRONMENT:-}"
+  # The documented example used to start with "env".
+  [[ "${assignments[0]:-}" == env ]] && assignments=("${assignments[@]:1}")
+  for assignment in "${assignments[@]}"; do
+    [[ "$assignment" =~ ^[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9_./:@%+,=-]*$ ]] || return 1
+    printf '%s\n' "$assignment"
+  done
+}
+
 RUN_PCT_COMMAND() {
   local target_id="$1"
   shift

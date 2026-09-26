@@ -33,6 +33,8 @@ else
   RUN_SSH_COMMAND() { local host="$1" port="$2" user="$3"; shift 3; ssh -q -o BatchMode=yes -o ConnectTimeout=5 -p "$port" "$user@$host" "$@"; }
   RUN_PROXMOX_COMMAND() { if [[ "${DEBUG:-false}" == true ]]; then "$@"; else "$@" >/dev/null 2>&1; fi; }
   RUN_PROXMOX_CAPTURE() { local rc; PROXMOX_CAPTURE_OUTPUT=$("$@" 2>&1); rc=$?; [[ "${DEBUG:-false}" == true && -n "$PROXMOX_CAPTURE_OUTPUT" ]] && printf '%s\n' "$PROXMOX_CAPTURE_OUTPUT"; return "$rc"; }
+  INTERNET_CHECK_COMMAND() { [[ "${CHECK_URL:-}" =~ ^[A-Za-z0-9:][A-Za-z0-9.:-]*$ ]] && printf 'ping -q -c1 %s >/dev/null 2>&1' "$CHECK_URL"; }
+  PACMAN_ENVIRONMENT_ASSIGNMENTS() { [[ -z "${PACMAN_ENVIRONMENT:-}" ]]; }
 fi
 CLUSTER_TARGET_FILE="${CLUSTER_TARGET_FILE:-$LOCAL_FILES/cluster-target.sh}"
 if [[ -f "$CLUSTER_TARGET_FILE" ]]; then
@@ -215,9 +217,13 @@ START_INITIAL_INVENTORY () {
 
 # Check internet status
 CHECK_INTERNET () {
-  local attempt delay
+  local attempt delay command
+  if ! command=$(INTERNET_CHECK_COMMAND); then
+    echo -e "${RD:-}❌ URL_FOR_INTERNET_CHECK must be a host name or IP address${CL:-}"
+    return 1
+  fi
   for attempt in 1 2 3; do
-    if "$CHECK_URL_EXE" -q -c1 "$CHECK_URL" &>/dev/null; then
+    if sh -c "$command"; then
       [[ "$attempt" -gt 1 ]] && echo -e "${GN:-}✅ Internet connection available${CL:-}"
       return 0
     fi
@@ -1542,17 +1548,11 @@ UPDATE_CONTAINER () {
     echo -e "🔄${GN:-} Check dist upgrade for LXC ${BL:-}$CONTAINER${CL:-} : ${GN:-}$NAME${CL:-}"
   fi
   # Check Internet connection
-  if [[ "$OS" != alpine ]]; then
-    if ! RUN_PCT_COMMAND "$CONTAINER" bash -c "$CHECK_URL_EXE -q -c1 $CHECK_URL &>/dev/null"; then
-      echo -e "${OR:-} ❌ Internet check fail - skip this container${CL:-}\n"
-      UPDATE_FAILURE=true
-      return
-    fi
-#  elif [[ "$OS" == alpine ]]; then
-#    if ! pct exec "$CONTAINER" -- ash -c "$CHECK_URL_EXE -q -c1 $CHECK_URL &>/dev/null"; then
-#      echo -e "${OR:-} Internet is not reachable - skip the update${CL:-}\n"
-#      return
-#    fi
+  local internet_check
+  if ! internet_check=$(INTERNET_CHECK_COMMAND) || ! RUN_PCT_COMMAND "$CONTAINER" sh -c "$internet_check"; then
+    echo -e "${OR:-} ❌ Internet check fail - skip this container${CL:-}\n"
+    UPDATE_FAILURE=true
+    return
   fi
   # Backup
   if [[ "$CHECK_DIST" != true ]]; then
@@ -1650,7 +1650,17 @@ UPDATE_CONTAINER () {
     UPDATE_CHECK
   elif [[ "$OS" =~ archlinux ]]; then
     echo -e "${OR:-}--- PACMAN UPDATE ---${CL:-}"
-    RUN_STEP "$CONTAINER" pct exec "$CONTAINER" -- bash -c "$PACMAN_ENVIRONMENT pacman -Syu --noconfirm"
+    local pacman_assignments
+    local -a pacman_environment=()
+    if ! pacman_assignments=$(PACMAN_ENVIRONMENT_ASSIGNMENTS); then
+      ERROR_CODE=1
+      ID=$CONTAINER
+      ERROR_MSG="PACMAN_ENVIRONMENT must be NAME=value assignments separated by spaces"
+      ERROR
+      return
+    fi
+    [[ -z "$pacman_assignments" ]] || mapfile -t pacman_environment <<< "$pacman_assignments"
+    RUN_STEP "$CONTAINER" pct exec "$CONTAINER" -- env "${pacman_environment[@]}" pacman -Syu --noconfirm
     if [[ $ERROR_CODE != "" ]]; then return; fi
     EXTRAS
     TRIM_FILESYSTEM
@@ -1829,7 +1839,8 @@ UPDATE_VM () {
       # Debian Base
       elif [[ "${OS,,}" =~ debian|ubuntu|mint|kali|neon|devuan ]]; then
         # Check Internet connection
-        if ! ssh -q -p "$SSH_VM_PORT" "$USER"@"$IP" "$CHECK_URL_EXE" -c1 "$CHECK_URL" &>/dev/null; then
+        local internet_check
+        if ! internet_check=$(INTERNET_CHECK_COMMAND) || ! ssh -q -p "$SSH_VM_PORT" "$USER"@"$IP" "$internet_check" </dev/null; then
           echo -e "${OR:-} ❌ Internet check fail - skip this VM${CL:-}\n"
           UPDATE_FAILURE=true
           return
@@ -1939,7 +1950,8 @@ UPDATE_VM_QEMU () {
       return
     elif [[ ${OS,,} =~ ubuntu|mint|kali|debian|devuan ]]; then
       # Check Internet connection
-      if ! (RUN_QEMU_COMMAND "$VM" -- bash -c "$CHECK_URL_EXE -q -c1 $CHECK_URL &>/dev/null"); then
+      local internet_check
+      if ! internet_check=$(INTERNET_CHECK_COMMAND) || ! (RUN_QEMU_COMMAND "$VM" -- sh -c "$internet_check" >/dev/null); then
         # Same as the LXC and SSH paths: a skipped update is not a success.
         echo -e "${OR:-} ❌ Internet check fail - skip this VM${CL:-}\n"
         UPDATE_FAILURE=true
