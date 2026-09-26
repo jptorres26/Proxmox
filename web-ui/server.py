@@ -1029,7 +1029,7 @@ body:has(#login-screen.open) .nav-scrim { display:none !important; }
     async function nodeAction(node,update=false){const key=`${update?'update':'check'}:${node}`,button=document.querySelector(`[data-node-action="${CSS.escape(key)}"]`);if(button?.disabled)return;if(update&&!confirm(`Update ${node}?\n\nOnly this Proxmox node will be updated. LXCs and VMs are not updated.`))return;document.querySelectorAll(`[data-node="${CSS.escape(node)}"]`).forEach(item=>{item.disabled=true});try{const d=await api(`/api/${update?'update-node':'check-node'}/${encodeURIComponent(node)}`,{method:'POST',body:'{}'});notice(d.message||'Action accepted.');await loadStatus();await loadJobs()}catch(error){notice(error.message,true)}finally{document.querySelectorAll(`[data-node="${CSS.escape(node)}"]`).forEach(item=>{item.disabled=false})}}
     async function refreshStatusSoon(attempt=0){if(attempt>=12)return;await new Promise(resolve=>setTimeout(resolve,2500));try{await loadStatus()}finally{refreshStatusSoon(attempt+1)}}
     function globalAction(update=false){const button=document.getElementById(update?'update-all':'check-all');if(button?.disabled)return;if(update){const ts=Array.isArray(currentStatus.targets)?currentStatus.targets:[],updates=ts.map(knownUpdates).filter(Number.isInteger).reduce((a,v)=>a+v,0),offline=ts.filter(t=>t.reachable===false).length;if(!confirm(`Update all systems?\n\n${updates} available updates are currently reported across the visible status. ${offline} system${offline===1?' is':'s are'} offline.\n\nConfigured update rules and safety checks will be respected.`))return}document.querySelectorAll('.global-action').forEach(item=>{item.disabled=true});button.textContent=update?'Starting updates…':'Starting check…';api(`/api/${update?'update-all':'check-all'}`,{method:'POST',body:'{}'}).then(async d=>{notice(d.message||'Action accepted.');await loadStatus();await loadJobs();refreshStatusSoon()}).catch(error=>notice(error.message,true)).finally(()=>{document.querySelectorAll('.global-action').forEach(item=>{item.disabled=false});button.textContent=update?'Update all systems':'Check all systems'})}
-    function nodeGroup(node,guests,host){const open=openNodes.has(node),guestLabel=`${guests.length} guest${guests.length===1?'':'s'}`,rebootBadge=host?.reboot_required===true?'<span class="reboot-required-badge">Reboot required</span>':'',statusBadges=host?`${statusTone(host)}${rebootBadge}`:'',card=document.createElement('article');card.className=`node-group${open?' open':''}`;card.innerHTML=`<div class="group-header"><button class="group-toggle" type="button" aria-expanded="${open}" aria-label="${open?'Collapse':'Expand'} ${esc(node)}"><span class="chevron" aria-hidden="true"></span></button><div class="group-title"><strong>${esc(node)}</strong><small>Proxmox node</small></div>${host?`<div class="group-status">${statusBadges}</div>`:''}</div><div class="group-info"><span class="group-updates">${updateSummary((host?[host]:guests).filter(Boolean))} · ${guestLabel}</span></div><div class="group-actions"><button class="node-action node-check" data-node-action="check:${esc(node)}" data-node="${esc(node)}" type="button">Check node</button><button class="node-action node-update" data-node-action="update:${esc(node)}" data-node="${esc(node)}" type="button">Update node</button><button class="node-details">Details</button></div>`;card.querySelector('.group-header').addEventListener('click',e=>{if(e.target.closest('.group-toggle'))return;toggleGroup(node)});card.querySelector('.group-toggle').addEventListener('click',e=>{e.stopPropagation();toggleGroup(node)});card.querySelector('.node-details').addEventListener('click',e=>{e.stopPropagation();if(host)renderDetails(host)});card.querySelector('.node-check').addEventListener('click',e=>{e.stopPropagation();nodeAction(node)});card.querySelector('.node-update').addEventListener('click',e=>{e.stopPropagation();nodeAction(node,true)});let panel=null;if(open){panel=document.createElement('section');panel.className='guest-panel';panel.innerHTML=`<div class="guest-panel-title">Guests on ${esc(node)}</div><div class="guest-list"></div>`;guests.forEach(t=>panel.querySelector('.guest-list').appendChild(targetRow(t)))}return{card,panel}}
+    function nodeGroup(node,guests,host){const open=openNodes.has(node),guestLabel=`${guests.length} guest${guests.length===1?'':'s'}`,rebootBadge=host?.reboot_required===true?'<span class="reboot-required-badge">Reboot required</span>':'',statusBadges=host?`${statusTone(host)}${rebootBadge}`:'',card=document.createElement('article');card.className=`node-group${open?' open':''}`;card.innerHTML=`<div class="group-header"><button class="group-toggle" type="button" aria-expanded="${open}" aria-label="${open?'Collapse':'Expand'} ${esc(node)}"><span class="chevron" aria-hidden="true"></span></button><div class="group-title"><strong>${esc(node)}</strong><small>${host?'Proxmox node':'Node unknown'}</small></div>${host?`<div class="group-status">${statusBadges}</div>`:''}</div><div class="group-info"><span class="group-updates">${updateSummary((host?[host]:guests).filter(Boolean))} · ${guestLabel}</span></div><div class="group-actions">${host?`<button class="node-action node-check" data-node-action="check:${esc(node)}" data-node="${esc(node)}" type="button">Check node</button><button class="node-action node-update" data-node-action="update:${esc(node)}" data-node="${esc(node)}" type="button">Update node</button><button class="node-details">Details</button>`:''}</div>`;card.querySelector('.group-header').addEventListener('click',e=>{if(e.target.closest('.group-toggle'))return;toggleGroup(node)});card.querySelector('.group-toggle').addEventListener('click',e=>{e.stopPropagation();toggleGroup(node)});if(host){card.querySelector('.node-details').addEventListener('click',e=>{e.stopPropagation();renderDetails(host)});card.querySelector('.node-check').addEventListener('click',e=>{e.stopPropagation();nodeAction(node)});card.querySelector('.node-update').addEventListener('click',e=>{e.stopPropagation();nodeAction(node,true)})}let panel=null;if(open){panel=document.createElement('section');panel.className='guest-panel';panel.innerHTML=`<div class="guest-panel-title">Guests on ${esc(node)}</div><div class="guest-list"></div>`;guests.forEach(t=>panel.querySelector('.guest-list').appendChild(targetRow(t)))}return{card,panel}}
     function externalGroup(targets){const group=document.createElement('section');const open=openNodes.has('__external__');group.className=`external-group${open?' open':''}`;group.innerHTML=`<div class="group-header"><button class="group-toggle" type="button" aria-expanded="${open}" aria-label="${open?'Collapse':'Expand'} external systems"><span class="chevron" aria-hidden="true"></span></button><div class="group-title"><div><strong>External systems</strong><small>${targets.length} target${targets.length===1?'':'s'}</small></div></div><div class="group-summary"><span>${updateSummary(targets)}</span></div></div><div class="group-body"><div class="guest-list"></div></div>`;group.querySelector('.group-header').addEventListener('click',()=>toggleGroup('__external__'));group.querySelector('.group-toggle').addEventListener('click',e=>{e.stopPropagation();toggleGroup('__external__')});targets.forEach(t=>group.querySelector('.guest-list').appendChild(targetRow(t)));return group}
     function render(data){currentStatus=data;const ts=Array.isArray(data.targets)?data.targets:[],nodes=sortNodes(ts.filter(isProxmoxNode)),guests=ts.filter(t=>t.type==='lxc'||t.type==='vm'),external=ts.filter(t=>!isProxmoxNode(t)&&t.type!=='lxc'&&t.type!=='vm');set('total',ts.length);set('online',ts.filter(t=>t.reachable===true).length);set('attention',ts.filter(t=>healthState(t)==='attention'||t.check_status==='updates_available').length);const list=document.getElementById('targets');list.replaceChildren();if(!ts.length){list.innerHTML='<div class="empty">No target status is available yet. Run a check to populate the view.</div>';return}if(nodes.length){const grid=document.createElement('div');grid.className='node-grid';let openPanel=null,assigned=new Set();nodes.forEach(host=>{const node=nodeLabel(host),members=guests.filter(t=>targetNode(t,nodes)===node);members.forEach(t=>assigned.add(t.id));const parts=nodeGroup(node,members,host);grid.appendChild(parts.card);if(parts.panel)openPanel=parts.panel});const unassigned=guests.filter(t=>!assigned.has(t.id));if(unassigned.length){const parts=nodeGroup('Guests without node assignment',unassigned,null);grid.appendChild(parts.card);if(parts.panel)openPanel=parts.panel}list.appendChild(grid);if(openPanel)list.appendChild(openPanel)}else if(guests.length){const grid=document.createElement('div');grid.className='node-grid';const parts=nodeGroup('Guests without node assignment',guests,null);grid.appendChild(parts.card);list.appendChild(grid);if(parts.panel)list.appendChild(parts.panel)}if(external.length)list.appendChild(externalGroup(external))}
     function renderJobs(){const n=document.getElementById('jobs');if(!jobs.length){n.hidden=true;openJobLogId=null;return}if(openJobLogId&&!jobs.some(j=>j.unit===openJobLogId))openJobLogId=null;const runningCount=jobs.filter(j=>j.state==='running').length,finished=jobs.length-runningCount;n.hidden=false;suppressLogScroll=true;n.innerHTML=`<div class="section-title"><button class="job-toggle"><span class="chevron" aria-hidden="true"></span><span>Jobs <span class="job-count">(${runningCount} running, ${finished} finished)</span></span></button><span class="job-summary">Server-side state · safe across browser/device changes</span></div><div class="job-list"></div>`;suppressLogScroll=false;n.classList.toggle('collapsed',!jobsExpanded);n.querySelector('.job-toggle').addEventListener('click',()=>{jobsExpanded=!jobsExpanded;n.classList.toggle('collapsed',!jobsExpanded)});const list=n.querySelector('.job-list');jobs.forEach(j=>{const item=document.createElement('div');item.className='job';const open=j.unit===openJobLogId;item.innerHTML=`<code>${esc(j.unit)}</code><span>${esc(j.target)}</span><span class="pill ${j.state==='completed'?'good':j.state==='failed'||j.state==='interrupted'?'bad':'warn'}">${esc(j.state==='completed_with_warnings'?'Please check':j.state)}</span><button data-job="${esc(j.unit)}">${open?'Hide log':'Show log'}</button><div class="log" id="log-${esc(j.unit)}"${open?'':' hidden'}></div>`;list.appendChild(item)});n.querySelectorAll('button[data-job]').forEach(b=>b.addEventListener('click',async()=>{const unit=b.dataset.job,node=document.getElementById(`log-${unit}`);jobsExpanded=true;n.classList.remove('collapsed');if(openJobLogId===unit){openJobLogId=null;node.hidden=true;b.textContent='Show log';return}openJobLogId=unit;logAutoFollow=true;logScrollTop=0;node.hidden=false;b.textContent='Hide log';await loadJobLog(unit,node);attachLogScroll(node)}));if(openJobLogId){const node=document.getElementById(`log-${openJobLogId}`);if(node){node.scrollTop=logAutoFollow?node.scrollHeight:logScrollTop;loadJobLog(openJobLogId,node).then(()=>{if(openJobLogId===node.id.slice(4))attachLogScroll(node)})}}}
@@ -1268,6 +1268,24 @@ def is_ascii_number(value):
 
 def error_payload(code, message):
     return {"error": {"code": code, "message": message}}
+
+
+class NotFoundError(KeyError):
+    """A failed lookup whose message is meant for the user."""
+
+    def __str__(self):
+        # KeyError's own str() quotes its argument like a dict key.
+        return str(self.args[0]) if self.args else "Not found."
+
+
+def error_message(error, fallback):
+    """Response text for a failed request. Validation messages (ValueError,
+    RuntimeError, NotFoundError) are written for the user; other errors can
+    carry file paths or internal state, so they go to the journal instead."""
+    if isinstance(error, (ValueError, RuntimeError, NotFoundError)):
+        return str(error) or fallback
+    print(f"{fallback} ({type(error).__name__}: {error})", file=sys.stderr)
+    return fallback
 
 
 def parse_state_line(line):
@@ -2634,7 +2652,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             target = next((item for item in self.internal_ssh_available_targets()
                            if item["kind"] == kind and item["id"] == target_id), None)
         if not target:
-            raise KeyError("Internal SSH target not found.")
+            raise NotFoundError("Internal SSH target not found.")
         return f"{kind}:{target_id}", target
 
     def handle_internal_ssh_update(self, kind, target_id, payload):
@@ -2970,7 +2988,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                 target = validate_target_payload(candidate, target_id)
             diagnostics, message = self.external_connection_diagnostics(target)
         except (OSError, ValueError, subprocess.TimeoutExpired) as error:
-            self.send_json(error_payload("CONNECTION_TEST_FAILED", str(error) or "The connection test failed."), HTTPStatus.BAD_REQUEST)
+            self.send_json(error_payload("CONNECTION_TEST_FAILED", error_message(error, "The connection test failed.")), HTTPStatus.BAD_REQUEST)
             return
         if message:
             response = error_payload("CONNECTION_TEST_FAILED", message)
@@ -3158,7 +3176,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                     self.scheduler_write_units(current)
                 except (OSError, RuntimeError, ValueError):
                     pass
-                self.send_json(error_payload("SCHEDULE_NOT_REMOVED", str(error) or "Schedule could not be removed."), HTTPStatus.UNPROCESSABLE_ENTITY)
+                self.send_json(error_payload("SCHEDULE_NOT_REMOVED", error_message(error, "Schedule could not be removed.")), HTTPStatus.UNPROCESSABLE_ENTITY)
                 return
         self.send_json({"message": "Schedule removed."})
 
@@ -3397,7 +3415,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             try:
                 self.handle_scheduler_create(payload)
             except (OSError, RuntimeError, ValueError) as error:
-                self.send_json(error_payload("SCHEDULE_NOT_SAVED", str(error) or "Schedule was rejected."), HTTPStatus.UNPROCESSABLE_ENTITY)
+                self.send_json(error_payload("SCHEDULE_NOT_SAVED", error_message(error, "Schedule was rejected.")), HTTPStatus.UNPROCESSABLE_ENTITY)
             return
         if len(parts) == 4 and parts[:2] == ["api", "schedules"] and parts[3] == "run":
             try:
@@ -3408,7 +3426,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                 self.send_json(error_payload("SCHEDULE_RUN_FAILED", "The schedule did not start in time."), HTTPStatus.GATEWAY_TIMEOUT)
             except (OSError, RuntimeError, ValueError) as error:
                 status = HTTPStatus.CONFLICT if "conflicting" in str(error).lower() else HTTPStatus.UNPROCESSABLE_ENTITY
-                self.send_json(error_payload("SCHEDULE_RUN_FAILED", str(error) or "Schedule could not be started."), status)
+                self.send_json(error_payload("SCHEDULE_RUN_FAILED", error_message(error, "Schedule could not be started.")), status)
             return
         if parts == ["api", "check-all"]:
             self.action_check_all()
@@ -3466,7 +3484,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             try:
                 self.handle_internal_ssh_update(parts[2], parts[3], payload)
             except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
-                self.send_json(error_payload("INTERNAL_SSH_SAVE_FAILED", str(error) or "Internal SSH settings were rejected."), HTTPStatus.UNPROCESSABLE_ENTITY)
+                self.send_json(error_payload("INTERNAL_SSH_SAVE_FAILED", error_message(error, "Internal SSH settings were rejected.")), HTTPStatus.UNPROCESSABLE_ENTITY)
             return
         if parts == ["api", "targets"]:
             try:
@@ -3693,7 +3711,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             except KeyError:
                 self.send_json(error_payload("SCHEDULE_NOT_FOUND", "That schedule does not exist."), HTTPStatus.NOT_FOUND)
             except (OSError, RuntimeError, ValueError) as error:
-                self.send_json(error_payload("SCHEDULE_NOT_SAVED", str(error) or "Schedule was rejected."), HTTPStatus.UNPROCESSABLE_ENTITY)
+                self.send_json(error_payload("SCHEDULE_NOT_SAVED", error_message(error, "Schedule was rejected.")), HTTPStatus.UNPROCESSABLE_ENTITY)
             return
         if len(parts) == 3 and parts[:2] == ["api", "targets"]:
             try:
@@ -3715,7 +3733,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             try:
                 self.handle_internal_ssh_delete(parts[2], parts[3])
             except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
-                self.send_json(error_payload("INTERNAL_SSH_REMOVE_FAILED", str(error) or "Internal SSH override was not removed."), HTTPStatus.UNPROCESSABLE_ENTITY)
+                self.send_json(error_payload("INTERNAL_SSH_REMOVE_FAILED", error_message(error, "Internal SSH override was not removed.")), HTTPStatus.UNPROCESSABLE_ENTITY)
             return
         if len(parts) == 3 and parts[:2] == ["api", "targets"]:
             try:

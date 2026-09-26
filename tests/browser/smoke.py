@@ -196,6 +196,7 @@ def run_browser(url, config_file, schedules_file):
                                           dialog.dismiss()))
         try:
             exercise_pages(page, url)
+            exercise_unassigned_guests(page, url)
             exercise_settings(page, url, config_file)
             exercise_scheduler(page, url, schedules_file)
         except Exception as error:
@@ -239,6 +240,32 @@ def exercise_pages(page, url):
     expect(page.locator("#dashboard")).to_be_visible()
     page.wait_for_load_state("networkidle")
     assert not injected_markup(page), "status data was rendered as HTML (XSS)"
+
+
+def exercise_unassigned_guests(page, url):
+    """Without Proxmox resources, a guest of an unknown node is listed in a
+    pseudo-group that has no node to check, update or show."""
+    def node(name):
+        return {"id": f"host:{name}", "type": "host", "transport": "local", "name": name,
+                "node": name, "reachable": True, "check_status": "no_updates",
+                "updates": {"available": 0}, "error": None}
+
+    status = {"schema_version": 1, "targets": [
+        node("pve-a"), node("pve-b"),
+        {"id": "103", "type": "lxc", "transport": "pct", "name": "orphan", "node": None,
+         "reachable": None, "check_status": "unknown", "updates": {"available": None}, "error": None},
+    ]}
+    page.route("**/api/status", lambda route: route.fulfill(
+        status=200, content_type="application/json", body=json.dumps(status)))
+    try:
+        page.goto(url + "/")
+        targets = page.locator("#targets")
+        unassigned = targets.locator("article.node-group", has_text="Guests without node assignment")
+        expect(unassigned).to_have_count(1)
+        expect(unassigned.locator(".node-action, .node-details")).to_have_count(0)
+        expect(targets.locator("article.node-group", has_text="pve-a").locator(".node-check")).to_have_count(1)
+    finally:
+        page.unroute("**/api/status")
 
 
 def exercise_settings(page, url, config_file):

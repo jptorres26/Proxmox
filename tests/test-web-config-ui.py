@@ -240,7 +240,7 @@ assert "<div class=\"group-header\"><button class=\"group-toggle\"" in page
 assert "</div><div class=\"group-info\"><span class=\"group-updates\"" in page
 assert "</span></div><div class=\"group-actions\">" in source
 assert "</span>${rebootBadge}</div>" not in source
-assert "<div class=\"group-actions\"><button class=\"node-action node-check\"" in page
+assert "<div class=\"group-actions\">${host?`<button class=\"node-action node-check\"" in page
 assert "<div class=\"group-status\">" in page
 assert "sortNodes(ts.filter(isProxmoxNode))" in page
 assert "config-field.boolean-field { width:fit-content" in page
