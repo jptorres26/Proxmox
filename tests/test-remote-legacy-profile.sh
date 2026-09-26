@@ -9,7 +9,7 @@ ROOT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 # the owner node or silently fall back to QGA when transfer fails.
 grep -Fq 'legacy_profile="$LOCAL_FILES/VMs/$target"' "$ROOT_DIR/ultimate-updater"
 grep -Fq '$remote_check_dir/VMs/$target' "$ROOT_DIR/ultimate-updater"
-grep -Fq 'mkdir -p -- '\''$remote_check_dir'\'' '\''$remote_check_dir/VMs'\''' "$ROOT_DIR/ultimate-updater"
+grep -Fq 'mkdir -m 0700 -- '\''$remote_check_dir'\'' && mkdir -- '\''$remote_check_dir/VMs'\''' "$ROOT_DIR/ultimate-updater"
 grep -Fq 'Could not transfer legacy SSH profile for target %s to node %s.' "$ROOT_DIR/ultimate-updater"
 
 # The remote update dispatch must use the same single-profile transfer and

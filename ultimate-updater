@@ -602,7 +602,7 @@ remote_node_check_via_cluster_transport() {
     return 1
   fi
   if ! timeout "${UU_CHECK_SSH_COMMAND_TIMEOUT:-15}" ssh "${ssh_args[@]}" -p "$port" "$user@$host" \
-    "mkdir -p -- '$remote_check_dir'" ||
+    "mkdir -m 0700 -- '$remote_check_dir'" ||
     ! timeout "${UU_CHECK_SSH_COMMAND_TIMEOUT:-15}" scp -q "${ssh_args[@]}" -P "$port" \
       "$LOCAL_FILES/update.conf" "$user@$host:$remote_config" ||
     ! timeout "${UU_CHECK_SSH_COMMAND_TIMEOUT:-15}" scp -q "${ssh_args[@]}" -P "$port" \
@@ -698,7 +698,9 @@ remote_update_job() {
   local user="${REMOTE_NODE_USER:-root}" output job_unit command remote_update_dir source scope_env=''
   local -a ssh_args=("${REMOTE_NODE_ARGS[@]}")
   remote_update_dir="/tmp/ultimate-updater-update-node-$$-$RANDOM-$RANDOM"
-  if ! timeout 15 ssh "${ssh_args[@]}" -p "$port" "$user@$host" "mkdir -p -- '$remote_update_dir'"; then
+  # mkdir without -p fails when the name exists: another local user on the
+  # node cannot hand us a directory (or a symlink) they prepared in /tmp.
+  if ! timeout 15 ssh "${ssh_args[@]}" -p "$port" "$user@$host" "mkdir -m 0700 -- '$remote_update_dir'"; then
     printf 'Could not prepare remote update workspace on %s.\n' "$node" >&2
     return 6
   fi
@@ -856,7 +858,7 @@ remote_target_check() {
     return 1
   fi
   if ! timeout "${UU_CHECK_SSH_COMMAND_TIMEOUT:-15}" ssh "${ssh_args[@]}" -p "$port" "$user@$host" \
-    "mkdir -p -- '$remote_check_dir' '$remote_check_dir/VMs'" ||
+    "mkdir -m 0700 -- '$remote_check_dir' && mkdir -- '$remote_check_dir/VMs'" ||
     ! timeout "${UU_CHECK_SSH_COMMAND_TIMEOUT:-15}" scp -q "${ssh_args[@]}" -P "$port" \
       "$LOCAL_FILES/update.conf" "$user@$host:$remote_config" ||
     ! timeout "${UU_CHECK_SSH_COMMAND_TIMEOUT:-15}" scp -q "${ssh_args[@]}" -P "$port" \
