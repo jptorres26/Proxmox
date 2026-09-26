@@ -548,7 +548,7 @@ CHECK_HOST () {
   local remote_done_found=false remote_done_transport_rc=0 remote_status_transport_rc=0
   local remote_diagnostics_found=false remote_diagnostics_size=0 remote_diagnostics_transport_rc=0
   local remote_status_found=false remote_status_size=0 remote_json_result=not-checked
-  local remote_node_status_ok=false
+  local remote_node_status_ok=false remote_local_dir
   local remote_job_timeout="${UU_CHECK_REMOTE_JOB_TIMEOUT:-300}"
   local remote_cleanup_state=pending remote_diag_level=success remote_failure_class=none
   # A node's port override must not change SSH_PORT for the next node.
@@ -574,16 +574,26 @@ CHECK_HOST () {
   remote_runtime_env=""
   remote_status_env=""
   remote_status_validation=""
-  remote_status_file="/tmp/ultimate-updater-remote-status-$$-$RANDOM.json"
+  # Local copies of the remote results stay in a private directory.
+  if ! remote_local_dir=$(mktemp -d /tmp/ultimate-updater-remote.XXXXXX); then
+    echo -e "${RD}Could not create a local work directory for remote host $HOST${CL}"
+    STATUS_MODEL_RECORD "$HOST_ID" host ssh false "" "" "null" "null" error CHECK_COMMAND_FAILED "Could not create a local work directory" "$HOST_NODE"
+    CENTRAL_REMOTE_PHASE "CENTRAL_REMOTE_END node=$HOST_NODE rc=1 phase=local-workdir"
+    return 1
+  fi
+  remote_status_file="$remote_local_dir/status.json"
   remote_diagnostics_file="$remote_check_dir/status-diagnostics"
-  remote_diagnostics_local_file="/tmp/ultimate-updater-remote-diagnostics-$$-$RANDOM.log"
+  remote_diagnostics_local_file="$remote_local_dir/diagnostics.log"
   remote_done_error_file="${remote_status_file}.completion.err"
   remote_status_error_file="${remote_status_file}.status.err"
   remote_diagnostics_error_file="${remote_status_file}.diagnostics.err"
-  if ! CHECK_REMOTE_SSH -q -o BatchMode=yes -o ConnectTimeout=5 "$HOST" -p "$SSH_PORT" "mkdir -p '$LOCAL_FILES' '$remote_check_dir'" ||
+  # mkdir without -p fails when the name exists: another local user on the
+  # node cannot hand us a directory (or a symlink) they prepared in /tmp.
+  if ! CHECK_REMOTE_SSH -q -o BatchMode=yes -o ConnectTimeout=5 "$HOST" -p "$SSH_PORT" "mkdir -p '$LOCAL_FILES' && mkdir -m 0700 '$remote_check_dir'" ||
     ! CHECK_REMOTE_SCP -q -o BatchMode=yes -o ConnectTimeout=5 -P "$SSH_PORT" "$LOCAL_FILES/update.conf" "$HOST:$LOCAL_FILES/update.conf" >/dev/null 2>&1 ||
     ! CHECK_REMOTE_SCP -q -o BatchMode=yes -o ConnectTimeout=5 -P "$SSH_PORT" "$TAG_FILTER_FILE" "$HOST:$remote_check_dir/tag-filter.sh" >/dev/null 2>&1; then
     CHECK_REMOTE_SSH -q -o BatchMode=yes -o ConnectTimeout=5 "$HOST" -p "$SSH_PORT" "rm -rf -- '$remote_check_dir'" >/dev/null 2>&1 || true
+    rm -rf -- "$remote_local_dir"
     echo -e "${RD}Could not prepare matching check helper on remote host $HOST${CL}"
     STATUS_MODEL_RECORD "$HOST_ID" host ssh false "" "" "null" "null" offline SSH_UNREACHABLE "Could not prepare remote check" "$HOST_NODE"
     CENTRAL_REMOTE_PHASE "CENTRAL_REMOTE_END node=$HOST_NODE rc=1 phase=prepare"
@@ -592,6 +602,7 @@ CHECK_HOST () {
   if [[ -f "$TARGET_RUNTIME_FILE" ]]; then
     if ! CHECK_REMOTE_SCP -q -o BatchMode=yes -o ConnectTimeout=5 -P "$SSH_PORT" "$TARGET_RUNTIME_FILE" "$HOST:$remote_check_dir/target-runtime.sh" >/dev/null 2>&1; then
       CHECK_REMOTE_SSH -q -o BatchMode=yes -o ConnectTimeout=5 "$HOST" -p "$SSH_PORT" "rm -rf -- '$remote_check_dir'" >/dev/null 2>&1 || true
+      rm -rf -- "$remote_local_dir"
       echo -e "${RD}Could not prepare target runtime helper on remote host $HOST${CL}"
       STATUS_MODEL_RECORD "$HOST_ID" host ssh false "" "" "null" "null" offline SSH_UNREACHABLE "Could not prepare remote target runtime" "$HOST_NODE"
       CENTRAL_REMOTE_PHASE "CENTRAL_REMOTE_END node=$HOST_NODE rc=1 phase=prepare-target-runtime"
@@ -602,6 +613,7 @@ CHECK_HOST () {
   if [[ -f "$STATUS_MODEL_SCRIPT" ]]; then
     if ! CHECK_REMOTE_SCP -q -o BatchMode=yes -o ConnectTimeout=5 -P "$SSH_PORT" "$STATUS_MODEL_SCRIPT" "$HOST:$remote_check_dir/status-model.sh" >/dev/null 2>&1; then
       CHECK_REMOTE_SSH -q -o BatchMode=yes -o ConnectTimeout=5 "$HOST" -p "$SSH_PORT" "rm -rf -- '$remote_check_dir'" >/dev/null 2>&1 || true
+      rm -rf -- "$remote_local_dir"
       echo -e "${RD}Could not prepare matching status helper on remote host $HOST${CL}"
       STATUS_MODEL_RECORD "$HOST_ID" host ssh false "" "" "null" "null" offline SSH_UNREACHABLE "Could not prepare remote status helper" "$HOST_NODE"
       CENTRAL_REMOTE_PHASE "CENTRAL_REMOTE_END node=$HOST_NODE rc=1 phase=prepare-status-helper"
@@ -773,7 +785,7 @@ PY
     "$remote_done_transport_rc" "$remote_status_transport_rc" "$remote_json_result" "$remote_cleanup_state" "$remote_failure_class" \
     "$remote_diagnostics_found" "$remote_diagnostics_size" "$remote_diagnostics_transport_rc"
   rm -f -- "$remote_status_file"
-  rm -f -- "$remote_diagnostics_local_file" "$remote_done_error_file" "$remote_status_error_file" "$remote_diagnostics_error_file"
+  rm -rf -- "$remote_local_dir"
   CENTRAL_REMOTE_PHASE "CENTRAL_CLEANUP_START node=$HOST_NODE"
   remote_cleanup_state=started
   local remote_cleanup_rc=0
