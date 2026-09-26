@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import sys
 sys.path.insert(0, str(Path(__file__).parents[1] / "web-ui"))
-import server  # noqa: E402
+import server
 
 
 source = Path(__file__).parents[1].joinpath("web-ui/server.py").read_text(encoding="utf-8")

@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "web-ui"))
-import server  # noqa: E402
+import server
 
 
 old = {key: os.environ.get(key) for key in ("WEB_UI_HTTPS", "WEB_UI_CERT_FILE", "WEB_UI_KEY_FILE")}

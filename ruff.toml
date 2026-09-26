@@ -1,0 +1,24 @@
+# Ruff configuration: https://docs.astral.sh/ruff/
+#
+# The Web UI is standard-library only and must run on the Python shipped with
+# every supported Proxmox VE release: 3.11 (PVE 8 / Debian 12) and 3.13
+# (PVE 9 / Debian 13).
+target-version = "py311"
+line-length = 120
+extend-exclude = ["web-ui/assets"]
+
+[lint]
+select = [
+  "B",    # flake8-bugbear: likely bugs and design problems
+  "E4",   # pycodestyle: import placement
+  "E7",   # pycodestyle: statements
+  "E9",   # pycodestyle: runtime/syntax errors
+  "F",    # Pyflakes
+  "PLE",  # Pylint errors
+  "RUF",  # Ruff-specific checks
+  "UP",   # pyupgrade: modern syntax for the target version
+]
+ignore = [
+  "RUF001", # the UI intentionally renders typographic characters (…, ·, –)
+]
+
