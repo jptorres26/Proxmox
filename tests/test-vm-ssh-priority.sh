@@ -82,7 +82,8 @@ CHECK_VM_QEMU() { printf 'qga-called\n' >> "$LOG"; return 1; }
 STATUS_MODEL_RECORD() { printf 'record:%s\n' "$*" >> "$LOG"; }
 qm() {
   case "$1" in
-    config) printf 'ostype: l2\nname: pfsense\n' ;;
+    # pfSense VMs usually have ostype "other"; a gate on l2x dropped them.
+    config) printf 'ostype: other\nname: pfsense\n' ;;
   esac
 }
 source "$PWD/internal-ssh.sh"
@@ -97,6 +98,42 @@ fi
 HARNESS
 chmod 750 "$WORK_DIR/ssh-harness.sh"
 (cd "$WORK_DIR" && bash ssh-harness.sh)
+
+# Alpine has no hostnamectl: the OS comes from /etc/os-release.
+cat > "$WORK_DIR/alpine-harness.sh" <<'HARNESS'
+#!/bin/bash
+set -euo pipefail
+LOCAL_FILES="$PWD"
+INTERNAL_SSH_CONFIG_FILE="$PWD/internal-ssh.conf"
+INITIAL_INVENTORY=false RDU=false VM=100
+STATUS_MODEL_NODE=test-node STATUS_MODEL_GUEST_NAME=""
+GN='' BL='' CL=''
+LOG="$PWD/alpine-result"
+SANITIZE_NUMBER() { tr -cd '0-9' <<< "$1"; }
+PRINT_UPDATE_TOTAL() { :; }
+INTERNAL_SSH_USE_IDENTITY() { :; }
+INTERNAL_SSH_RESOLVE_VM() { source "$PWD/internal-ssh.sh"; INTERNAL_SSH_RESOLVE vm "$1" "$2" "$3" "$4"; }
+RUN_SSH_COMMAND() {
+  case "$4" in
+    true) return 0 ;;
+    'cat /etc/os-release') printf 'NAME="Alpine Linux"\nID=alpine\nPRETTY_NAME="Alpine Linux v3.20"\n' ;;
+    'uname -s') printf 'Linux\n' ;;
+    'apk list -u | wc -l') printf '4\n' ;;
+    *) return 1 ;;
+  esac
+}
+CHECK_VM_QEMU() { printf 'qga-called\n' >> "$LOG"; return 1; }
+STATUS_MODEL_RECORD() { printf 'record:%s\n' "$*" >> "$LOG"; }
+qm() { [[ "$1" == config ]] && printf 'ostype: l26\nname: alpine\n'; return 0; }
+source "$PWD/internal-ssh.sh"
+source "$PWD/check-vm.sh"
+CHECK_VM 100 > /dev/null
+grep -Fq 'record:100 vm ssh true Alpine Linux v3.20 apk 4 false updates_available' "$LOG"
+HARNESS
+(cd "$WORK_DIR" && bash alpine-harness.sh)
+# The update path detects SSH-only FreeBSD and reads os-release as well.
+grep -Fq "\"\$USER\"@\"\$IP\" 'uname -s' </dev/null" "$ROOT_DIR/update.sh"
+grep -Fq "\"\$USER\"@\"\$IP\" 'cat /etc/os-release' </dev/null" "$ROOT_DIR/update.sh"
 
 # A persisted override with enabled=false is a deliberate QGA fallback, not
 # a failed VM check.  The disabled entry must not invoke SSH or return 1

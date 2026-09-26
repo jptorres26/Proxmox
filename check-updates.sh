@@ -828,43 +828,50 @@ CHECK_HOST_ITSELF () {
 }
 
 # Proxmox kernel packages can install a new bootable kernel without leaving
-# Debian's /var/run/reboot-required marker.  Compare the currently running
-# kernel with the newest kernel selected by proxmox-boot-tool.  Respect an
-# explicit manual kernel selection; it is an intentional administrator choice.
+# Debian's /var/run/reboot-required marker. Compare the running kernel with
+# the kernel the next boot uses:
+# - a pinned kernel (`proxmox-boot-tool kernel pin [--next-boot]`), if it is
+#   still installed;
+# - otherwise the newest installed kernel. "Manually selected" kernels
+#   (`proxmox-boot-tool kernel add`) are only kept on the ESP in addition;
+#   they were wrongly treated as the boot choice, which either reported a
+#   reboot forever or hid one after a kernel update.
 HOST_KERNEL_REBOOT_REQUIRED () {
-  local current_kernel newest_kernel manual_kernels automatic_kernels candidates kernel
+  local current_kernel expected_kernel="" kernel pin kernels=""
+  local boot_dir="${UU_BOOT_DIR:-/boot}" pin_dir="${UU_KERNEL_PIN_DIR:-/etc/kernel}"
   current_kernel=$(uname -r 2>/dev/null || true)
   [[ -n "$current_kernel" ]] || return 1
 
-  if command -v proxmox-boot-tool >/dev/null 2>&1; then
-    manual_kernels=$(proxmox-boot-tool kernel list 2>/dev/null | awk '
-      /Manually selected kernels:/ {section="manual"; next}
-      /Automatically selected kernels:/ {section="automatic"; next}
-      section == "manual" && $1 ~ /^[0-9].*-pve$/ {print $1}
-    ')
-    automatic_kernels=$(proxmox-boot-tool kernel list 2>/dev/null | awk '
-      /Manually selected kernels:/ {section="manual"; next}
-      /Automatically selected kernels:/ {section="automatic"; next}
-      section == "automatic" && $1 ~ /^[0-9].*-pve$/ {print $1}
-    ')
-    if [[ -n "$manual_kernels" ]]; then
-      candidates=$manual_kernels
-    else
-      candidates=$automatic_kernels
+  for pin in "$pin_dir/next-boot-pin" "$pin_dir/proxmox-boot-pin"; do
+    [[ -s "$pin" ]] || continue
+    read -r kernel < "$pin" || true
+    if [[ -n "$kernel" && -e "$boot_dir/vmlinuz-$kernel" ]]; then
+      expected_kernel=$kernel
+      break
     fi
-  else
-    candidates=$(find /boot -maxdepth 1 -type f -name 'vmlinuz-*-pve' -printf '%f\n' 2>/dev/null |
-      sed 's/^vmlinuz-//')
+  done
+
+  if [[ -z "$expected_kernel" ]]; then
+    if command -v proxmox-boot-tool >/dev/null 2>&1; then
+      kernels=$(proxmox-boot-tool kernel list 2>/dev/null | awk '
+        /^(Manually|Automatically) selected kernels:/ {section = 1; next}
+        /^[^[:space:]0-9]/ {section = 0}
+        section && $1 ~ /^[0-9].*-pve$/ {print $1}
+      ')
+    fi
+    if [[ -z "$kernels" ]]; then
+      kernels=$(find "$boot_dir" -maxdepth 1 -type f -name 'vmlinuz-*-pve' -printf '%f\n' 2>/dev/null |
+        sed 's/^vmlinuz-//')
+    fi
+    while IFS= read -r kernel; do
+      [[ -n "$kernel" && -e "$boot_dir/vmlinuz-$kernel" ]] || continue
+      if [[ -z "$expected_kernel" ]] || dpkg --compare-versions "$kernel" gt "$expected_kernel"; then
+        expected_kernel=$kernel
+      fi
+    done <<< "$kernels"
   fi
 
-  while IFS= read -r kernel; do
-    [[ -n "$kernel" && -e "/boot/vmlinuz-$kernel" ]] || continue
-    if [[ -z "$newest_kernel" ]] || dpkg --compare-versions "$kernel" gt "$newest_kernel"; then
-      newest_kernel=$kernel
-    fi
-  done <<< "$candidates"
-
-  [[ -n "$newest_kernel" && "$newest_kernel" != "$current_kernel" ]]
+  [[ -n "$expected_kernel" && "$expected_kernel" != "$current_kernel" ]]
 }
 
 ## Container ##
@@ -1353,121 +1360,123 @@ CHECK_VM () {
       "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME"
     return 0
   fi
-  OS_BASE=$(qm config "$VM" | grep ostype || true)
-  if [[ "$OS_BASE" =~ l2 ]]; then
-    KERNEL=$(qm guest cmd "$VM" get-osinfo 2>/dev/null | grep kernel-version || true)
-    OS=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" hostnamectl 2>/dev/null | grep System || true)
-    # FreeBSD/pfSense does not provide hostnamectl.  Detect it through the
-    # SSH guest instead of treating a reachable, explicitly configured SSH
-    # transport as an unsupported Linux guest.  QGA-only FreeBSD remains on
-    # the deliberate unsupported path in CHECK_VM_QEMU.
-    SSH_UNAME=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "uname -s" 2>/dev/null || true)
-    SSH_UNAME_VERSION=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "uname -v" 2>/dev/null || true)
-    if [[ "$SSH_UNAME" == FreeBSD || "$KERNEL" =~ FreeBSD ]]; then
-      if [[ "$SSH_UNAME_VERSION" =~ [Pp][Ff][Ss]ense ]]; then
-        OS=pfSense
-      else
-        OS=FreeBSD
-      fi
-      if [[ "$SSH_UNAME_VERSION" =~ [0-9] ]]; then
-        OS="${OS} / ${SSH_UNAME_VERSION}"
-      fi
-      if FREEBSD_PKG_LIST=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "pkg version -U -l '<'" 2>/dev/null); then
-        PKG_RC=0
-      else
-        PKG_RC=$?
-      fi
-      if [[ $PKG_RC -ne 0 ]]; then
-        STATUS_MODEL_RECORD "$VM" vm ssh false "$OS" pkg "null" "null" error CHECK_COMMAND_FAILED \
-          "pkg version failed for VM $VM" "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME"
-        return 1
-      fi
-      UPDATES=$(printf '%s\n' "$FREEBSD_PKG_LIST" | awk '$NF == "<" {count++} END {print count+0}')
-      UPDATES=$(SANITIZE_NUMBER "$UPDATES")
-      UPDATES=${UPDATES:-0}
-      [[ "$UPDATES" -gt 0 ]] && echo -e "${GN}VM ${BL}$VM${CL} : ${GN}$NAME${CL}"
-      [[ "$UPDATES" -gt 0 ]] && PRINT_UPDATE_TOTAL "$UPDATES"
-      STATUS_MODEL_STATUS=ok
-      [[ "$UPDATES" -gt 0 ]] && STATUS_MODEL_STATUS=updates_available
-      STATUS_MODEL_RECORD "$VM" vm ssh true "$OS" pkg "$UPDATES" false "$STATUS_MODEL_STATUS" "" "" \
-        "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME" null null
-      return 0
-    fi
-    if [[ ${OS,,} =~ ubuntu|mint|kali|debian|devuan ]]; then
-      RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "apt-get update" >/dev/null 2>&1
-      APT_OUTPUT=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "apt-get -s --with-new-pkgs upgrade")
-      READ_APT_UPDATE_COUNTS "$APT_OUTPUT"
-      if RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" stat /var/run/reboot-required.pkgs >/dev/null 2>&1; then
-        REBOOT_REQUIRED=true
-      fi
-      if [[ "$SECURITY_APT_UPDATES" -gt 0 || "$NORMAL_APT_UPDATES" -gt 0 || "$REBOOT_REQUIRED" == true ]]; then
-        echo -e "${GN}VM ${BL}$VM${CL} : ${GN}$NAME${CL}"
-      fi
-      if [[ "$REBOOT_REQUIRED" == true ]]; then
-        echo -e "${OR} Reboot required${CL}"
-      fi
-      if [[ "$SECURITY_APT_UPDATES" -gt 0 || "$NORMAL_APT_UPDATES" -gt 0 || "$REBOOT_REQUIRED" == true ]]; then
-        PRINT_UPDATE_SPLIT "$NORMAL_APT_UPDATES" "$SECURITY_APT_UPDATES"
-      fi
-      # Checks only report reboot_required. Reboot execution belongs exclusively
-      # to the update runtime and must never occur in this function.
-    elif [[ "$OS" =~ Fedora ]]; then
-      UPDATES=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "$DNF_COUNT_COMMAND")
-      UPDATES=$(SANITIZE_NUMBER "$UPDATES")
-      UPDATES=${UPDATES:-0}
-      if [[ "$UPDATES" -gt 0 ]]; then
-        echo -e "${GN}VM ${BL}$VM${CL} : ${GN}$NAME${CL}"
-      fi
-      [[ "$UPDATES" -gt 0 ]] && PRINT_UPDATE_TOTAL "$UPDATES"
-    elif [[ "$OS" =~ Arch ]]; then
-      UPDATES=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "$PACMAN_COUNT_COMMAND")
-      UPDATES=${UPDATES//[^0-9]/}
-      UPDATES=${UPDATES:-0}
-      if [[ "$UPDATES" -gt 0 ]]; then
-        echo -e "${GN}VM ${BL}$VM${CL} : ${GN}$NAME${CL}"
-      fi
-      [[ "$UPDATES" -gt 0 ]] && PRINT_UPDATE_TOTAL "$UPDATES"
-    elif [[ "$OS" =~ Alpine ]]; then
-      UPDATES=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "apk list -u | wc -l")
-      UPDATES=$(SANITIZE_NUMBER "$UPDATES")
-      UPDATES=${UPDATES:-0}
-      if [[ "$UPDATES" -gt 0 ]]; then
-        echo -e "${GN}VM ${BL}$VM${CL} : ${GN}$NAME${CL}"
-      fi
-      [[ "$UPDATES" -gt 0 ]] && PRINT_UPDATE_TOTAL "$UPDATES"
-    elif [[ "$OS" =~ CentOS ]]; then
-      UPDATES=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "$YUM_COUNT_COMMAND")
-      UPDATES=$(SANITIZE_NUMBER "$UPDATES")
-      UPDATES=${UPDATES:-0}
-      if [[ "$UPDATES" -gt 0 ]]; then
-        echo -e "${GN}VM ${BL}$VM${CL} : ${GN}$NAME${CL}"
-      fi
-      [[ "$UPDATES" -gt 0 ]] && PRINT_UPDATE_TOTAL "$UPDATES"
-    fi
-    if [[ ${OS,,} =~ ubuntu|mint|kali|debian|devuan ]]; then
-      SSH_MODEL_UPDATES=$((SECURITY_APT_UPDATES + NORMAL_APT_UPDATES))
-      SSH_MODEL_STATUS=ok
-      [[ "$SSH_MODEL_UPDATES" -gt 0 || "$REBOOT_REQUIRED" == true ]] && SSH_MODEL_STATUS=updates_available
-      STATUS_MODEL_RECORD "$VM" vm ssh true "$OS" apt "$SSH_MODEL_UPDATES" "${REBOOT_REQUIRED:-false}" "$SSH_MODEL_STATUS" "" "" "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME" "$NORMAL_APT_UPDATES" "$SECURITY_APT_UPDATES"
-    elif [[ ${OS,,} =~ fedora ]]; then
-      STATUS_MODEL_STATUS=ok
-      [[ "${UPDATES:-0}" -gt 0 ]] && STATUS_MODEL_STATUS=updates_available
-      STATUS_MODEL_RECORD "$VM" vm ssh true "$OS" dnf "${UPDATES:-0}" false "$STATUS_MODEL_STATUS" "" "" "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME" null null
-    elif [[ ${OS,,} =~ arch ]]; then
-      STATUS_MODEL_STATUS=ok
-      [[ "${UPDATES:-0}" -gt 0 ]] && STATUS_MODEL_STATUS=updates_available
-      STATUS_MODEL_RECORD "$VM" vm ssh true "$OS" pacman "${UPDATES:-0}" false "$STATUS_MODEL_STATUS" "" "" "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME" null null
-    elif [[ ${OS,,} =~ alpine ]]; then
-      STATUS_MODEL_STATUS=ok
-      [[ "${UPDATES:-0}" -gt 0 ]] && STATUS_MODEL_STATUS=updates_available
-      STATUS_MODEL_RECORD "$VM" vm ssh true "$OS" apk "${UPDATES:-0}" false "$STATUS_MODEL_STATUS" "" "" "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME" null null
-    elif [[ ${OS,,} =~ centos ]]; then
-      STATUS_MODEL_STATUS=ok
-      [[ "${UPDATES:-0}" -gt 0 ]] && STATUS_MODEL_STATUS=updates_available
-      STATUS_MODEL_RECORD "$VM" vm ssh true "$OS" yum "${UPDATES:-0}" false "$STATUS_MODEL_STATUS" "" "" "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME" null null
+  # Every ostype: pfSense/FreeBSD VMs usually have "other", and a gate on
+  # l2x Linux types dropped them without any status record.
+  KERNEL=$(qm guest cmd "$VM" get-osinfo 2>/dev/null | grep kernel-version || true)
+  # os-release exists on every supported Linux; Alpine has no hostnamectl.
+  OS=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "cat /etc/os-release" 2>/dev/null |
+    awk -F= '$1 == "PRETTY_NAME" {gsub(/^"|"$/, "", $2); print $2; exit}' || true)
+  [[ -n "$OS" ]] || OS=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" hostnamectl 2>/dev/null | grep System || true)
+  # FreeBSD/pfSense does not provide hostnamectl.  Detect it through the
+  # SSH guest instead of treating a reachable, explicitly configured SSH
+  # transport as an unsupported Linux guest.  QGA-only FreeBSD remains on
+  # the deliberate unsupported path in CHECK_VM_QEMU.
+  SSH_UNAME=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "uname -s" 2>/dev/null || true)
+  SSH_UNAME_VERSION=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "uname -v" 2>/dev/null || true)
+  if [[ "$SSH_UNAME" == FreeBSD || "$KERNEL" =~ FreeBSD ]]; then
+    if [[ "$SSH_UNAME_VERSION" =~ [Pp][Ff][Ss]ense ]]; then
+      OS=pfSense
     else
-      STATUS_MODEL_RECORD "$VM" vm ssh true "$OS" "" "null" "null" unsupported UNSUPPORTED_OS "No supported updater detected"
+      OS=FreeBSD
     fi
+    if [[ "$SSH_UNAME_VERSION" =~ [0-9] ]]; then
+      OS="${OS} / ${SSH_UNAME_VERSION}"
+    fi
+    if FREEBSD_PKG_LIST=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "pkg version -U -l '<'" 2>/dev/null); then
+      PKG_RC=0
+    else
+      PKG_RC=$?
+    fi
+    if [[ $PKG_RC -ne 0 ]]; then
+      STATUS_MODEL_RECORD "$VM" vm ssh false "$OS" pkg "null" "null" error CHECK_COMMAND_FAILED \
+        "pkg version failed for VM $VM" "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME"
+      return 1
+    fi
+    UPDATES=$(printf '%s\n' "$FREEBSD_PKG_LIST" | awk '$NF == "<" {count++} END {print count+0}')
+    UPDATES=$(SANITIZE_NUMBER "$UPDATES")
+    UPDATES=${UPDATES:-0}
+    [[ "$UPDATES" -gt 0 ]] && echo -e "${GN}VM ${BL}$VM${CL} : ${GN}$NAME${CL}"
+    [[ "$UPDATES" -gt 0 ]] && PRINT_UPDATE_TOTAL "$UPDATES"
+    STATUS_MODEL_STATUS=ok
+    [[ "$UPDATES" -gt 0 ]] && STATUS_MODEL_STATUS=updates_available
+    STATUS_MODEL_RECORD "$VM" vm ssh true "$OS" pkg "$UPDATES" false "$STATUS_MODEL_STATUS" "" "" \
+      "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME" null null
+    return 0
+  fi
+  if [[ ${OS,,} =~ ubuntu|mint|kali|debian|devuan ]]; then
+    RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "apt-get update" >/dev/null 2>&1
+    APT_OUTPUT=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "apt-get -s --with-new-pkgs upgrade")
+    READ_APT_UPDATE_COUNTS "$APT_OUTPUT"
+    if RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" stat /var/run/reboot-required.pkgs >/dev/null 2>&1; then
+      REBOOT_REQUIRED=true
+    fi
+    if [[ "$SECURITY_APT_UPDATES" -gt 0 || "$NORMAL_APT_UPDATES" -gt 0 || "$REBOOT_REQUIRED" == true ]]; then
+      echo -e "${GN}VM ${BL}$VM${CL} : ${GN}$NAME${CL}"
+    fi
+    if [[ "$REBOOT_REQUIRED" == true ]]; then
+      echo -e "${OR} Reboot required${CL}"
+    fi
+    if [[ "$SECURITY_APT_UPDATES" -gt 0 || "$NORMAL_APT_UPDATES" -gt 0 || "$REBOOT_REQUIRED" == true ]]; then
+      PRINT_UPDATE_SPLIT "$NORMAL_APT_UPDATES" "$SECURITY_APT_UPDATES"
+    fi
+    # Checks only report reboot_required. Reboot execution belongs exclusively
+    # to the update runtime and must never occur in this function.
+  elif [[ "$OS" =~ Fedora ]]; then
+    UPDATES=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "$DNF_COUNT_COMMAND")
+    UPDATES=$(SANITIZE_NUMBER "$UPDATES")
+    UPDATES=${UPDATES:-0}
+    if [[ "$UPDATES" -gt 0 ]]; then
+      echo -e "${GN}VM ${BL}$VM${CL} : ${GN}$NAME${CL}"
+    fi
+    [[ "$UPDATES" -gt 0 ]] && PRINT_UPDATE_TOTAL "$UPDATES"
+  elif [[ "$OS" =~ Arch ]]; then
+    UPDATES=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "$PACMAN_COUNT_COMMAND")
+    UPDATES=${UPDATES//[^0-9]/}
+    UPDATES=${UPDATES:-0}
+    if [[ "$UPDATES" -gt 0 ]]; then
+      echo -e "${GN}VM ${BL}$VM${CL} : ${GN}$NAME${CL}"
+    fi
+    [[ "$UPDATES" -gt 0 ]] && PRINT_UPDATE_TOTAL "$UPDATES"
+  elif [[ "$OS" =~ Alpine ]]; then
+    UPDATES=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "apk list -u | wc -l")
+    UPDATES=$(SANITIZE_NUMBER "$UPDATES")
+    UPDATES=${UPDATES:-0}
+    if [[ "$UPDATES" -gt 0 ]]; then
+      echo -e "${GN}VM ${BL}$VM${CL} : ${GN}$NAME${CL}"
+    fi
+    [[ "$UPDATES" -gt 0 ]] && PRINT_UPDATE_TOTAL "$UPDATES"
+  elif [[ "$OS" =~ CentOS ]]; then
+    UPDATES=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "$YUM_COUNT_COMMAND")
+    UPDATES=$(SANITIZE_NUMBER "$UPDATES")
+    UPDATES=${UPDATES:-0}
+    if [[ "$UPDATES" -gt 0 ]]; then
+      echo -e "${GN}VM ${BL}$VM${CL} : ${GN}$NAME${CL}"
+    fi
+    [[ "$UPDATES" -gt 0 ]] && PRINT_UPDATE_TOTAL "$UPDATES"
+  fi
+  if [[ ${OS,,} =~ ubuntu|mint|kali|debian|devuan ]]; then
+    SSH_MODEL_UPDATES=$((SECURITY_APT_UPDATES + NORMAL_APT_UPDATES))
+    SSH_MODEL_STATUS=ok
+    [[ "$SSH_MODEL_UPDATES" -gt 0 || "$REBOOT_REQUIRED" == true ]] && SSH_MODEL_STATUS=updates_available
+    STATUS_MODEL_RECORD "$VM" vm ssh true "$OS" apt "$SSH_MODEL_UPDATES" "${REBOOT_REQUIRED:-false}" "$SSH_MODEL_STATUS" "" "" "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME" "$NORMAL_APT_UPDATES" "$SECURITY_APT_UPDATES"
+  elif [[ ${OS,,} =~ fedora ]]; then
+    STATUS_MODEL_STATUS=ok
+    [[ "${UPDATES:-0}" -gt 0 ]] && STATUS_MODEL_STATUS=updates_available
+    STATUS_MODEL_RECORD "$VM" vm ssh true "$OS" dnf "${UPDATES:-0}" false "$STATUS_MODEL_STATUS" "" "" "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME" null null
+  elif [[ ${OS,,} =~ arch ]]; then
+    STATUS_MODEL_STATUS=ok
+    [[ "${UPDATES:-0}" -gt 0 ]] && STATUS_MODEL_STATUS=updates_available
+    STATUS_MODEL_RECORD "$VM" vm ssh true "$OS" pacman "${UPDATES:-0}" false "$STATUS_MODEL_STATUS" "" "" "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME" null null
+  elif [[ ${OS,,} =~ alpine ]]; then
+    STATUS_MODEL_STATUS=ok
+    [[ "${UPDATES:-0}" -gt 0 ]] && STATUS_MODEL_STATUS=updates_available
+    STATUS_MODEL_RECORD "$VM" vm ssh true "$OS" apk "${UPDATES:-0}" false "$STATUS_MODEL_STATUS" "" "" "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME" null null
+  elif [[ ${OS,,} =~ centos ]]; then
+    STATUS_MODEL_STATUS=ok
+    [[ "${UPDATES:-0}" -gt 0 ]] && STATUS_MODEL_STATUS=updates_available
+    STATUS_MODEL_RECORD "$VM" vm ssh true "$OS" yum "${UPDATES:-0}" false "$STATUS_MODEL_STATUS" "" "" "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME" null null
+  else
+    STATUS_MODEL_RECORD "$VM" vm ssh true "$OS" "" "null" "null" unsupported UNSUPPORTED_OS "No supported updater detected"
   fi
 }
 

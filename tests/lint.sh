@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the static checks enforced by CI: ShellCheck for every tracked shell
+# Run the static checks enforced by CI: ShellCheck for every shell
 # script, Ruff for the Python web UI and tests, and actionlint for workflows.
 # Install the pinned tool versions with:
 #   python3 -m pip install -r requirements-dev.txt
@@ -19,7 +19,8 @@ if ((${#missing[@]})); then
 fi
 
 # Same selection rule as the previous ShellCheck action: shell extensions or a
-# shell shebang, regardless of file name.
+# shell shebang, regardless of file name. New files count before they are
+# committed (tracked plus untracked, minus .gitignore).
 shell_files=()
 while IFS= read -r -d '' file; do
   [[ -f "$file" ]] || continue
@@ -27,7 +28,7 @@ while IFS= read -r -d '' file; do
     head -n 1 -- "$file" | grep -Eq '^#! */[^ ]*/(env *)?[abkd]*sh'; then
     shell_files+=("$file")
   fi
-done < <(git ls-files -z)
+done < <(git ls-files -z --cached --others --exclude-standard)
 
 rc=0
 printf '==> ShellCheck (%d files)\n' "${#shell_files[@]}"
