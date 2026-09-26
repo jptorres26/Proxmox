@@ -10,7 +10,7 @@ runner = (root / "job-runner.sh").read_text(encoding="utf-8")
 assert "/api/jobs/${encodeURIComponent(unit)}/download" in source
 assert "Content-Disposition" in source
 assert "JOB_RE.fullmatch(unit)" in source
-assert '"journalctl", "-u", unit, "--no-pager", "-o", "cat"' in source
+assert '"journalctl", "-u", unit, "-n", "100000", "--no-pager", "-o", "cat"' in source
 assert '"Full log is no longer available."' in source
 assert "remote-log-full" in source
 assert "UPDATE_NOT_REGISTERED" in source

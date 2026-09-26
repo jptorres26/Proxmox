@@ -41,7 +41,7 @@ with tempfile.NamedTemporaryFile() as identity:
     assert "-i" in command and identity.name in command
 
 fake_result = SimpleNamespace(returncode=0, stdout="Linux\n", stderr="")
-with patch("server.subprocess.run", return_value=fake_result) as run:
+with patch("server.run_process", return_value=fake_result) as run:
     result, message = server.StatusHandler.run_ssh_connection_test(
         object.__new__(server.StatusHandler), payload, "uname -s"
     )
@@ -51,7 +51,8 @@ assert run.call_args.args[0][-1] == "uname -s"
 ping_result = SimpleNamespace(returncode=0, stdout="", stderr="")
 auth_result = SimpleNamespace(returncode=0, stdout="", stderr="")
 uname_result = SimpleNamespace(returncode=0, stdout="Linux\n", stderr="")
-with patch("server.subprocess.run", side_effect=[ping_result, auth_result, uname_result]) as run, \
+with patch("server.subprocess.run", return_value=ping_result) as run, \
+     patch("server.run_process", side_effect=[auth_result, uname_result]), \
      patch("server.socket.create_connection") as connect:
     connect.return_value.__enter__.return_value = object()
     diagnostics, message = server.StatusHandler.external_connection_diagnostics(
@@ -66,7 +67,8 @@ assert run.call_args_list[0].args[0][:4] == ["ping", "-c", "1", "-W"]
 assert connect.called
 
 auth_failed = SimpleNamespace(returncode=255, stdout="", stderr="Permission denied (publickey)")
-with patch("server.subprocess.run", side_effect=[ping_result, auth_failed]), \
+with patch("server.subprocess.run", return_value=ping_result), \
+     patch("server.run_process", side_effect=[auth_failed]), \
      patch("server.socket.create_connection") as connect:
     connect.return_value.__enter__.return_value = object()
     diagnostics, message = server.StatusHandler.external_connection_diagnostics(
@@ -91,7 +93,7 @@ owner.internal_ssh_catalog = lambda: ([{
 }], [])
 guest = {"id": "310", "host": "192.168.40.310", "user": "root", "port": 22,
          "identity_file": ""}
-with patch("server.subprocess.run", return_value=fake_result) as run:
+with patch("server.run_process", return_value=fake_result) as run:
     result, message = owner.run_owner_guest_connection_test(guest)
 assert message is None and result.returncode == 0
 outer_command = run.call_args.args[0]
