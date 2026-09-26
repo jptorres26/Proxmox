@@ -855,15 +855,7 @@ UPDATE () {
     remove_non_runtime_payload "$LOCAL_FILES"
     chmod -R +x "$TEMP_FILES"/exit/*.sh
     cd "$TEMP_FILES"
-    FILES="*.* **/*.*"
-    for FILE in $FILES
-    do
-     [[ "$FILE" == targets.conf ]] && continue
-     case "$FILE" in
-       docs|docs/*|RELEASE_NOTES_5.1.md|UPGRADE_NOTES_5.1.md|CONTRIBUTING.md|requirements-dev.txt|ruff.toml) continue ;;
-     esac
-     CHECK_DIFF
-    done
+    INSTALL_PAYLOAD_FILES
     remove_non_runtime_payload "$LOCAL_FILES"
     if [[ -x "$LOCAL_FILES/legacy-migrate.sh" ]]; then
       if ! "$LOCAL_FILES/legacy-migrate.sh"; then
@@ -893,6 +885,35 @@ UPDATE () {
       exit 0
     fi
   fi
+}
+
+# Install the files of the extracted payload (the current directory) into
+# $LOCAL_FILES: top-level files and one directory level, as before.
+INSTALL_PAYLOAD_FILES () {
+  local -a payload_files
+  local restore_nullglob
+  restore_nullglob=$(shopt -p nullglob || true)
+  # Without nullglob a pattern that matches nothing is used as a file name.
+  shopt -s nullglob
+  payload_files=(*.* */*.*)
+  eval "$restore_nullglob"
+  for FILE in "${payload_files[@]}"; do
+    case "$FILE" in
+      targets.conf|docs/*|RELEASE_NOTES_5.1.md|UPGRADE_NOTES_5.1.md|CONTRIBUTING.md|requirements-dev.txt|ruff.toml) continue ;;
+      exit/*)
+        # Exit hooks are meant to be edited ("Here you can execute
+        # commands"). A self-update does not replace a changed hook: the
+        # new default goes beside it as <hook>.dist.
+        if [[ -f "$LOCAL_FILES/$FILE" ]] && ! cmp -s -- "$FILE" "$LOCAL_FILES/$FILE"; then
+          mv -f -- "$FILE" "$LOCAL_FILES/$FILE.dist"
+          echo -e "ℹ ${OR:-}Kept your $FILE; the new default is $FILE.dist${CL:-}"
+          continue
+        fi
+        rm -f -- "$LOCAL_FILES/$FILE.dist"
+        ;;
+    esac
+    CHECK_DIFF
+  done
 }
 
 CHECK_DIFF () {
