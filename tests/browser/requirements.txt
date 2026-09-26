@@ -1,0 +1,2 @@
+# Browser smoke test only (tests/browser/smoke.py).
+playwright==1.63.0

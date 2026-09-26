@@ -30,6 +30,16 @@ sudo env "PATH=$PATH" tests/run-all.sh   # root-only fixtures as well
 ```
 
 `tests/run-all.sh` accepts name filters, for example `tests/run-all.sh qga web`.
+
+The Web UI also has a headless-browser smoke test that signs in, visits every
+page, and fails on JavaScript errors or unescaped status data:
+
+```bash
+python3 -m pip install -r tests/browser/requirements.txt
+python3 -m playwright install --with-deps chromium
+python3 tests/browser/smoke.py
+```
+
 The regression tests use temporary fixtures and command stubs; they never
 touch a real Proxmox installation. Live validation on dedicated test nodes
 is described in [TESTING.md](TESTING.md) and
