@@ -146,6 +146,20 @@ echo "rc=$rc error=$SCRIPT_ONLY_ERROR" >> "$LOG"
 HARNESS
 grep -Fxq 'rc=2 error=No user scripts found for LXC 101' "$WORK_DIR/empty.log"
 
+# --- PACMAN_ENVIRONMENT is data, not shell code ------------------------------------------------
+# shellcheck disable=SC1090
+source <(sed -n '/^PACMAN_ENVIRONMENT_ASSIGNMENTS() {/,/^}/p' "$ROOT_DIR/target-runtime.sh")
+[[ "$(PACMAN_ENVIRONMENT='LANG=C HTTP_PROXY=http://proxy:3128' PACMAN_ENVIRONMENT_ASSIGNMENTS)" == $'LANG=C\nHTTP_PROXY=http://proxy:3128' ]]
+[[ -z "$(PACMAN_ENVIRONMENT='' PACMAN_ENVIRONMENT_ASSIGNMENTS)" ]]
+[[ "$(PACMAN_ENVIRONMENT='env http_proxy=http://some.proxy:1234' PACMAN_ENVIRONMENT_ASSIGNMENTS)" == 'http_proxy=http://some.proxy:1234' ]]
+for value in 'LANG=C; reboot' '$(id)' 'pacman' 'A=1 `id`'; do
+  if PACMAN_ENVIRONMENT="$value" PACMAN_ENVIRONMENT_ASSIGNMENTS >/dev/null; then
+    echo "accepted PACMAN_ENVIRONMENT: $value" >&2
+    exit 1
+  fi
+done
+grep -Fq 'pct exec "$CONTAINER" -- env "${pacman_environment[@]}" pacman -Syu --noconfirm' "$UPDATE"
+
 # --- no failed step is repeated to capture its output anywhere -------------------------------
 if grep -n 'ERROR_MSG=\$(' "$UPDATE" | grep -v 'tail -n 20 -- "\$output"'; then
   echo 'a failed command is still run a second time' >&2

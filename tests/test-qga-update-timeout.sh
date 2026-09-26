@@ -54,6 +54,7 @@ QEMU_GUEST_EXEC_DURABLE 700 --timeout 60 -- bash -c 'dnf -y upgrade'
   sed -n '/^UPDATE_VM_QEMU () {/,/^}/p' "$ROOT_DIR/update.sh"
   sed -n '/^VM_UPDATE_START () {/,/^}/p' "$ROOT_DIR/update.sh"
   sed -n '/^guest_id_matches() {/,/^}/p' "$ROOT_DIR/tag-filter.sh"
+  sed -n '/^INTERNET_CHECK_COMMAND() {/,/^}/p' "$ROOT_DIR/target-runtime.sh"
 } > "$WORK_DIR/functions.sh"
 awk '/^QGA_UPDATE_TIMEOUT=/ { print; getline; print }' "$ROOT_DIR/update.sh" > "$WORK_DIR/settings.sh"
 [[ $(wc -l < "$WORK_DIR/settings.sh") == 2 ]]

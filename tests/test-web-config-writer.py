@@ -88,6 +88,7 @@ for key, value in (
 for key, value in (
     ("URL_FOR_INTERNET_CHECK", "2001:db8::1"), ("URL_FOR_INTERNET_CHECK", "1.1.1.1"),
     ("EXE_FOR_INTERNET_CHECK", "/usr/bin/ping"), ("PACMAN_ENVIRONMENT", "LANG=C HTTP_PROXY=http://proxy:3128"),
+    ("PACMAN_ENVIRONMENT", "env http_proxy=http://some.proxy:1234"),
     ("EMAIL_SENDER", "Updater <updater@example.org>"), ("ONLY", "100,101 prod"), ("EXCLUDE", ""),
     ("COMPOSE_PATH", "/srv/docker compose"),
 ):

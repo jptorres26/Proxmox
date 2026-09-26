@@ -457,7 +457,7 @@ CONFIG_STRING_PATTERNS = {
     "EMAIL_SENDER": re.compile(r"(?:\$USER|[A-Za-z0-9_.%+@][A-Za-z0-9_.%+@<> -]*)?"),
     "EXE_FOR_INTERNET_CHECK": re.compile(r"(?:[A-Za-z0-9_/][A-Za-z0-9_./-]*)?"),
     "URL_FOR_INTERNET_CHECK": re.compile(r"(?:[A-Za-z0-9:][A-Za-z0-9.:-]*)?"),
-    "PACMAN_ENVIRONMENT": re.compile(rf"(?:{_ENV_ASSIGNMENT}(?: +{_ENV_ASSIGNMENT})*)?"),
+    "PACMAN_ENVIRONMENT": re.compile(rf"(?:(?:env +)?{_ENV_ASSIGNMENT}(?: +{_ENV_ASSIGNMENT})*)?"),
     "COMPOSE_PATH": re.compile(r"(?:/[A-Za-z0-9_.@+ /-]*)?"),
 }
 if set(CONFIG_STRING_PATTERNS) != CONFIG_STRING_KEYS - set(CONFIG_ENUMS):

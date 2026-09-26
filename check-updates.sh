@@ -354,19 +354,14 @@ READ_WRITE_CONFIG () {
 # use it for the read-only onboarding mode; normal checks retain their
 # established semantics.
 GUEST_INTERNET_PREFLIGHT_COMMAND() {
-  local executable="${EXE_FOR_INTERNET_CHECK:-ping}" url="${CHECK_URL:-}"
-  local executable_q url_q
-  [[ -n "$url" ]] || return 1
-  printf -v executable_q '%q' "$executable"
-  printf -v url_q '%q' "$url"
-  printf '%s -q -c1 %s >/dev/null 2>&1' "$executable_q" "$url_q"
+  INTERNET_CHECK_COMMAND
 }
 
 GUEST_INTERNET_PREFLIGHT_PCT() {
   local command
   command=$(GUEST_INTERNET_PREFLIGHT_COMMAND) || return 1
   UU_CHECK_PCT_COMMAND_TIMEOUT="${UU_GUEST_PREFLIGHT_TIMEOUT:-5}" \
-    RUN_PCT_COMMAND "$1" bash -c "$command"
+    RUN_PCT_COMMAND "$1" sh -c "$command"
 }
 
 GUEST_INTERNET_PREFLIGHT_SSH() {
@@ -379,7 +374,7 @@ GUEST_INTERNET_PREFLIGHT_SSH() {
 GUEST_INTERNET_PREFLIGHT_QGA() {
   local command
   command=$(GUEST_INTERNET_PREFLIGHT_COMMAND) || return 1
-  QEMU_GUEST_EXEC "$1" --timeout "${UU_GUEST_PREFLIGHT_TIMEOUT:-5}" -- bash -c "$command"
+  QEMU_GUEST_EXEC "$1" --timeout "${UU_GUEST_PREFLIGHT_TIMEOUT:-5}" -- sh -c "$command"
   [[ "$QEMU_EXEC_TRANSPORT_RC" -eq 0 && "$QEMU_EXEC_EXITCODE" -eq 0 ]]
 }
 
@@ -390,7 +385,7 @@ WAIT_FOR_BOOTUP_LXC () {
   COUNT=1
   sleep "$LXC_START_DELAY"
   while [ $COUNT -le $MAX_RETRIES ]; do
-    if timeout 10 pct exec "$CONTAINER" -- bash -c "exit" >/dev/null 2>&1; then
+    if timeout 10 pct exec "$CONTAINER" -- sh -c "exit 0" >/dev/null 2>&1; then
       break
     else
       sleep "$LXC_START_DELAY"
