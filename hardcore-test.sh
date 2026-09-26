@@ -42,9 +42,19 @@ atomic_write() {
   mv -f "$temporary" "$target"
 }
 
+# The state file holds one key per line: a line break in a value could add
+# or replace keys (for example a second status= line).
+single_line() {
+  local value
+  for value in "$@"; do
+    [[ "$value" != *[$'\n\r']* ]] || { printf 'State values may not contain line breaks.\n' >&2; return 64; }
+  done
+}
+
 write_state() {
   local directory="$1" status="$2" phase="$3" current_test="$4" reason="${5:-}"
   local state_file="$directory/state"
+  single_line "$status" "$phase" "$current_test" "$reason" || return
   atomic_write "$state_file" <<EOF
 run_id=$(basename "$directory")
 status=$status
@@ -68,6 +78,7 @@ read_run_id() {
 
 run_start() {
   local phase="${1:-baseline}" description="${2:-}" run_id directory existing status
+  single_line "$phase" "$description" || return
   install -d -m 0750 "$HARDCORE_ROOT"
   if [[ -r "$CURRENT_FILE" ]]; then
     existing=$(read_run_id)
@@ -111,7 +122,7 @@ run_log() {
   [[ -f "$directory/state" && -f "$directory/journal.tsv" ]] || { printf 'Unknown hardcore test run: %s\n' "$1" >&2; return 1; }
   local value
   for value in "${@:2}"; do
-    [[ "$value" != *$'\t'* && "$value" != *$'\n'* ]] || { printf 'Journal values may not contain tabs or newlines.\n' >&2; return 64; }
+    [[ "$value" != *[$'\t\n\r']* ]] || { printf 'Journal values may not contain tabs or line breaks.\n' >&2; return 64; }
   done
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${@:2}" >> "$directory/journal.tsv"
