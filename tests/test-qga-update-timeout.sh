@@ -32,7 +32,7 @@ QEMU_GUEST_EXEC() {
 
 # A timeout of 0 waits without limit, as it does for QEMU_GUEST_EXEC; it used
 # to end the wait on the first "still running" poll.
-POLL_RESULTS=(pending pending done) poll_count=0
+POLL_RESULTS=(pending pending 'done') poll_count=0
 SECONDS=100   # the old deadline arithmetic only misbehaved once SECONDS > 0
 QEMU_GUEST_EXEC_DURABLE 700 --timeout 0 -- bash -c 'dnf -y upgrade'
 [[ "$QEMU_EXEC_TRANSPORT_RC" == 0 && "$QEMU_EXEC_EXITCODE" == 0 ]] ||

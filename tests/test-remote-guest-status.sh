@@ -24,6 +24,7 @@ grep -Fq 'REMOTE_STATUS_MISSING' "$SOURCE"
 grep -Fq 'REMOTE_STATUS_INVALID' "$SOURCE"
 grep -Fq 'Remote guest status is invalid' "$SOURCE"
 grep -Fq 'SSH_TRANSPORT' "$ROOT_DIR/check-updates.sh"
+# shellcheck disable=SC2016 # literal source text
 grep -Fq 'Could not read configuration for LXC $CONTAINER' "$ROOT_DIR/check-updates.sh"
 grep -Fq 'target.get("error")' "$SOURCE"
 # The source assertion intentionally matches shell parameter syntax literally.

@@ -112,11 +112,11 @@ EXIT_ON_ERROR=true CONTAINER_UPDATE_START > stop.out
 HARNESS
 [[ "$(cat "$WORK_DIR/stop.log")" == 'update 101' ]]
 grep -Fq 'Skipped LXC 102: an earlier update failed' "$WORK_DIR/stop.out"
-run continue <<'HARNESS'
+run keep-going <<'HARNESS'
 source loop-common.sh
 EXIT_ON_ERROR=false CONTAINER_UPDATE_START > /dev/null
 HARNESS
-[[ "$(cat "$WORK_DIR/continue.log")" == $'update 101\nupdate 102' ]]
+[[ "$(cat "$WORK_DIR/keep-going.log")" == $'update 101\nupdate 102' ]]
 run listing <<'HARNESS'
 source loop-common.sh
 EXIT_ON_ERROR=false PCT_LIST_FAILS=true CONTAINER_UPDATE_START > /dev/null
