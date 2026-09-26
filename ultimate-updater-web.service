@@ -1,19 +1,31 @@
 [Unit]
 Description=Ultimate Updater web UI
-Wants=network-online.target
-After=network-online.target
+# pve-cluster mounts /etc/pve, which holds the node certificate.
+Wants=network-online.target pve-cluster.service
+After=network-online.target pve-cluster.service
 
 [Service]
-Type=simple
+Type=exec
 User=root
 Group=root
 WorkingDirectory=/etc/ultimate-updater
+# Default port when web-ui.conf is missing; the file overrides it.
+Environment=WEB_UI_PORT=8765
 EnvironmentFile=-/etc/ultimate-updater/web-ui.conf
 ExecStart=/usr/bin/python3 /etc/ultimate-updater/web-ui/server.py --bind 0.0.0.0 --port ${WEB_UI_PORT}
 Restart=on-failure
 RestartSec=5s
 Environment=PYTHONUNBUFFERED=1
 UMask=0077
+# Hardening that leaves the updater's file and process access unchanged
+# (jobs run in their own transient units).
+NoNewPrivileges=yes
+LockPersonality=yes
+ProtectClock=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
 
 [Install]
 WantedBy=multi-user.target

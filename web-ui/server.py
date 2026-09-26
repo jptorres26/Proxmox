@@ -119,6 +119,7 @@ DEFAULT_PROXMOX_CERT = Path("/etc/pve/local/pve-ssl.pem")
 DEFAULT_PROXMOX_KEY = Path("/etc/pve/local/pve-ssl.key")
 DEFAULT_PROXMOX_CUSTOM_CERT = Path("/etc/pve/local/pveproxy-ssl.pem")
 DEFAULT_PROXMOX_CUSTOM_KEY = Path("/etc/pve/local/pveproxy-ssl.key")
+PROXMOX_NODE_MARKER = Path("/usr/bin/pveversion")
 TARGET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 CONTENT_LENGTH_RE = re.compile(r"[0-9]{1,7}")
 MAX_REQUEST_BODY = 4096
@@ -226,7 +227,7 @@ def scheduler_next_run_value(raw):
     if not value or value.lower() in {"n/a", "-", "0"}:
         return None
     try:
-        if value.isdigit():
+        if is_ascii_number(value):
             timestamp = int(value)
             if timestamp <= 0:
                 return None
@@ -416,7 +417,56 @@ def build_tls_context():
         raise TLSConfigurationError(f"HTTPS requested but unavailable: {reason}")
     if custom_configured:
         raise TLSConfigurationError(f"Configured WebUI HTTPS certificate is invalid: {reason}")
+    if PROXMOX_NODE_MARKER.exists():
+        # A Proxmox VE node always has a node certificate once pve-cluster
+        # has mounted /etc/pve. Starting before that used to serve plain HTTP
+        # (and the root password) for the whole process lifetime; fail so
+        # systemd retries instead.
+        raise TLSConfigurationError(f"Proxmox node certificate is not available yet: {reason}")
     return None, "HTTP fallback", None, reason
+
+
+def tls_certificate_state():
+    """Modification times of every certificate/key file build_tls_context() may use."""
+    paths = [os.environ.get("WEB_UI_CERT_FILE", "").strip(), os.environ.get("WEB_UI_KEY_FILE", "").strip(),
+             DEFAULT_PROXMOX_CUSTOM_CERT, DEFAULT_PROXMOX_CUSTOM_KEY, DEFAULT_PROXMOX_CERT, DEFAULT_PROXMOX_KEY]
+    state = []
+    for path in paths:
+        if not path:
+            continue
+        try:
+            state.append((str(path), Path(path).stat().st_mtime_ns))
+        except OSError:
+            state.append((str(path), None))
+    return tuple(state)
+
+
+def reload_tls_context(server, previous_state):
+    """Swap in a new SSL context when a certificate or key file changed.
+
+    Renewals (ACME, `pvenode cert set`) used to be served only after a
+    restart, so the certificate eventually expired. New connections use the
+    new context; a context that fails to load keeps the current one.
+    """
+    state = tls_certificate_state()
+    if state == previous_state:
+        return state
+    try:
+        context, source, cert_file, _reason = build_tls_context()
+    except TLSConfigurationError as error:
+        print(f"WebUI TLS reload skipped: {error}", flush=True)
+        return state
+    if context is not None:
+        server.tls_context = context
+        print(f"WebUI TLS certificate reloaded; source: {source}; certificate: {cert_file}", flush=True)
+    return state
+
+
+def watch_tls_certificates(server, interval=600):
+    state = tls_certificate_state()
+    while True:
+        time.sleep(interval)
+        state = reload_tls_context(server, state)
 
 CONFIG_BOOLEAN_KEYS = {
     "CHECK_WITH_HOST", "CHECK_WITH_LXC", "CHECK_WITH_VM",
@@ -1183,6 +1233,11 @@ SECURITY_HEADERS = (
 )
 
 
+def is_ascii_number(value):
+    """str.isdigit() also accepts characters such as "²" that int() rejects."""
+    return isinstance(value, str) and re.fullmatch(r"[0-9]+", value) is not None
+
+
 def error_payload(code, message):
     return {"error": {"code": code, "message": message}}
 
@@ -1238,7 +1293,7 @@ def parse_updater_version_output(output):
     def numeric(value):
         if not value or not re.fullmatch(r"\d+(?:\.\d+)*", value):
             return None
-        return tuple(int(part) for part in value.split(".") if part.isdigit())
+        return tuple(int(part) for part in value.split(".") if is_ascii_number(part))
     local_numbers, remote_numbers = numeric(installed), numeric(available)
     version_update = bool(local_numbers is not None and remote_numbers is not None and remote_numbers > local_numbers)
     commit_update = bool(re.fullmatch(r"[0-9a-f]{40}", installed_commit) and
@@ -1281,7 +1336,7 @@ def config_value_map(content):
         value = values.get(key)
         if key in CONFIG_BOOLEAN_KEYS and value is not None:
             result[key] = value.lower() == "true"
-        elif key in CONFIG_INTEGER_KEYS and value is not None and value.isdigit():
+        elif key in CONFIG_INTEGER_KEYS and value is not None and is_ascii_number(value):
             result[key] = int(value)
         else:
             result[key] = value
@@ -1318,7 +1373,7 @@ def parse_internal_ssh_text(content):
             raise ValueError("invalid internal SSH host")
         if key == "user" and not USER_RE.fullmatch(value):
             raise ValueError("invalid internal SSH user")
-        if key == "port" and (not value.isdigit() or not 1 <= int(value) <= 65535):
+        if key == "port" and (not is_ascii_number(value) or not 1 <= int(value) <= 65535):
             raise ValueError("invalid internal SSH port")
         if key == "identity_file" and (not value.startswith("/") or "\n" in value):
             raise ValueError("identity_file must be an absolute path")
@@ -1761,7 +1816,7 @@ def preview_eligible_ids(targets, config, scope):
     eligible = set()
     for item in targets:
         kind = str(item.get("type", "")).lower()
-        if kind not in {"lxc", "vm"} or not str(item.get("id", "")).isdigit():
+        if kind not in {"lxc", "vm"} or not is_ascii_number(str(item.get("id", ""))):
             continue
         if str(enabled[kind]).lower() != "true":
             continue
@@ -1795,7 +1850,7 @@ def target_preview(payload, config, tag_filter, inventory, proxmox_resources=Non
     excluded_external_ids = {token.lower() for token in filter_tokens(exclude)} & external_ids
     def filterable(item):
         kind = str(item.get("type", "")).lower()
-        return (kind in {"lxc", "vm"} and str(item.get("id", "")).isdigit()) or kind == "external"
+        return (kind in {"lxc", "vm"} and is_ascii_number(str(item.get("id", "")))) or kind == "external"
     def selected(item):
         item_id = str(item.get("id", ""))
         if str(item.get("type", "")).lower() in {"lxc", "vm"}:
@@ -1826,7 +1881,7 @@ def target_preview(payload, config, tag_filter, inventory, proxmox_resources=Non
     def token_has_match(token, eligible_scope):
         if token.lower() in external_ids:
             return True
-        if token.isdigit():
+        if is_ascii_number(token):
             return token in (eligible_scope if eligible_scope is not None else known_ids)
         token_only, _ = resolve_filter_ids(
             token, "", tag_filter, eligible_scope,
@@ -2494,7 +2549,7 @@ class StatusHandler(BaseHTTPRequestHandler):
         vm_profiles = self.server.config_file.parent / "VMs"
         vm_ids = {str(item.get("vmid", item.get("id", ""))).split("/")[-1]: item
                   for item in resources if isinstance(item, dict) and item.get("type") in {"qemu", "lxc"}}
-        for vmid in sorted(vm_ids, key=lambda value: (not value.isdigit(), value)):
+        for vmid in sorted(vm_ids, key=lambda value: (not is_ascii_number(value), value)):
             kind = "lxc" if vm_ids[vmid].get("type") == "lxc" else "vm"
             section = f"{kind}:{vmid}"
             override = overrides.get(section, {})
@@ -2510,7 +2565,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             port = override.get("port", defaults.get("SSH_VM_PORT", "22"))
             target = {"kind": kind, "id": vmid, "name": vm_ids[vmid].get("name", vmid),
                       "node": vm_ids[vmid].get("node"), "host": host, "user": user,
-                      "port": int(port) if str(port).isdigit() else 22,
+                      "port": int(port) if is_ascii_number(str(port)) else 22,
                       "identity_file": override.get("identity_file", ""),
                       "enabled": override.get("enabled", "true") == "true",
                       "source": "Internal SSH override" if override else ("Existing SSH profile (legacy format)" if defaults else "QGA/default"),
@@ -2717,7 +2772,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             return
         try:
             _result, message = (self.run_owner_guest_connection_test(target)
-                                if kind in {"vm", "lxc"} and target_id.isdigit()
+                                if kind in {"vm", "lxc"} and is_ascii_number(target_id)
                                 else self.run_ssh_connection_test(target))
         except (RuntimeError, ValueError) as error:
             self.send_json(error_payload("SSH_TEST_FAILED", str(error)), HTTPStatus.BAD_GATEWAY)
@@ -2927,7 +2982,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                            "type": target_type, "type_label": type_labels[target_type]})
         order = {"host": 0, "vm": 1, "lxc": 2, "external": 3}
         return sorted(result, key=lambda item: (order[item["type"]], str(item["node"]),
-                                                int(item["id"]) if item["id"].isdigit() else item["id"]))
+                                                int(item["id"]) if is_ascii_number(item["id"]) else item["id"]))
 
     def scheduler_write_units(self, schedule):
         unit, service, timer, service_text, timer_text = scheduler_unit_files(
@@ -3688,6 +3743,7 @@ def main():
         print(f"Scheduler units could not be refreshed: {error}", flush=True)
     if tls_context is not None:
         print(f"HTTPS enabled; certificate source: {tls_source}; certificate: {tls_cert}", flush=True)
+        threading.Thread(target=watch_tls_certificates, args=(server,), daemon=True).start()
         protocol = "https"
     else:
         print(f"HTTPS unavailable; using HTTP fallback: {tls_fallback_reason}", flush=True)
