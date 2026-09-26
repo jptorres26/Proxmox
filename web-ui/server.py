@@ -4,6 +4,7 @@
 import argparse
 import base64
 import fcntl
+import functools
 import hashlib
 import hmac
 import json
@@ -16,9 +17,11 @@ import socket
 import stat
 import ssl
 import subprocess
+import sys
 import tempfile
 import threading
 import time
+import traceback
 from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -117,6 +120,8 @@ DEFAULT_PROXMOX_KEY = Path("/etc/pve/local/pve-ssl.key")
 DEFAULT_PROXMOX_CUSTOM_CERT = Path("/etc/pve/local/pveproxy-ssl.pem")
 DEFAULT_PROXMOX_CUSTOM_KEY = Path("/etc/pve/local/pveproxy-ssl.key")
 TARGET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+CONTENT_LENGTH_RE = re.compile(r"[0-9]{1,7}")
+MAX_REQUEST_BODY = 4096
 JOB_RE = re.compile(r"^ultimate-updater-(?:update|check)-[A-Za-z0-9_.-]+$")
 HOST_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
 USER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
@@ -1115,7 +1120,7 @@ def parse_state_line(line):
         owner_node = None
     return {"unit": unit, "target": target, "state": state,
             "started_at": started or None, "finished_at": finished or None,
-            "exit_code": int(exit_code) if exit_code.lstrip("-").isdigit() else None,
+            "exit_code": int(exit_code) if re.fullmatch(r"-?[0-9]{1,9}", exit_code) else None,
             "type": job_type if job_type in {"check", "update", "selfupdate"} else "update",
             "source": source, "owner_node": owner_node, "remote": owner_node is not None}
 
@@ -1930,8 +1935,86 @@ class AuthStore:
         self.sessions.pop(token, None)
 
 
+class UpdaterServer(ThreadingHTTPServer):
+    """Threaded HTTP(S) server that one misbehaving client cannot stall.
+
+    The listening socket stays plain: TLS is negotiated per connection in the
+    worker thread (StatusHandler.setup) under the handler timeout, so a client
+    that connects and never completes a handshake cannot block accept().
+    Concurrent connections are capped to bound threads and memory.
+    """
+
+    daemon_threads = True
+    request_queue_size = 64
+    max_connections = 64
+
+    def __init__(self, server_address, handler_class, tls_context=None):
+        self.tls_context = tls_context
+        self.tls_enabled = tls_context is not None
+        self._connection_slots = threading.BoundedSemaphore(self.max_connections)
+        super().__init__(server_address, handler_class)
+
+    def get_request(self):
+        connection, address = self.socket.accept()
+        if self.tls_context is not None:
+            connection = self.tls_context.wrap_socket(connection, server_side=True, do_handshake_on_connect=False)
+        return connection, address
+
+    def process_request(self, request, client_address):
+        if not self._connection_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._connection_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connection_slots.release()
+
+    def handle_error(self, request, client_address):
+        # Failed handshakes, resets, and idle clients hitting the timeout are
+        # routine for a network service; keep them out of the journal.
+        if isinstance(sys.exc_info()[1], (ssl.SSLError, ConnectionError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
+
+def guarded_request(method):
+    """Answer unexpected handler errors with a JSON 500 instead of a dropped connection."""
+
+    @functools.wraps(method)
+    def wrapper(self):
+        self.response_started = False
+        try:
+            method(self)
+        except (ConnectionError, TimeoutError, ssl.SSLError):
+            raise
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
+            if not self.response_started:
+                self.send_json(error_payload("INTERNAL_ERROR", "The request could not be completed."),
+                               HTTPStatus.INTERNAL_SERVER_ERROR)
+    return wrapper
+
+
 class StatusHandler(BaseHTTPRequestHandler):
     server_version = "UltimateUpdaterUI/1"
+    # Bounds every socket read/write, including the TLS handshake in setup().
+    timeout = 30
+
+    def setup(self):
+        super().setup()
+        if isinstance(self.connection, ssl.SSLSocket):
+            self.connection.do_handshake()
+
+    def send_response(self, code, message=None):
+        self.response_started = True
+        super().send_response(code, message)
 
     def current_session(self):
         cookie = self.headers.get("Cookie", "")
@@ -1962,7 +2045,9 @@ class StatusHandler(BaseHTTPRequestHandler):
         if not self.same_origin():
             self.send_json(error_payload("ORIGIN_REJECTED", "The request origin is not allowed."), HTTPStatus.FORBIDDEN)
             return False
-        if not hmac.compare_digest(self.headers.get("X-CSRF-Token", ""), session["csrf"]):
+        token = self.headers.get("X-CSRF-Token", "")
+        # compare_digest() raises TypeError for non-ASCII str arguments.
+        if not token.isascii() or not hmac.compare_digest(token, session["csrf"]):
             self.send_json(error_payload("CSRF_REJECTED", "A valid CSRF token is required."), HTTPStatus.FORBIDDEN)
             return False
         return True
@@ -1998,22 +2083,27 @@ class StatusHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def read_body(self):
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            raise ValueError("invalid content length") from None
-        if length > 4096:
+        # Parse Content-Length strictly: int() would accept "-1", and
+        # rfile.read(-1) buffers the socket until EOF before authentication.
+        if self.headers.get("Transfer-Encoding"):
+            raise ValueError("chunked request bodies are not supported")
+        raw_length = (self.headers.get("Content-Length") or "0").strip()
+        if not CONTENT_LENGTH_RE.fullmatch(raw_length):
+            raise ValueError("invalid content length")
+        length = int(raw_length)
+        if length > MAX_REQUEST_BODY:
             raise OverflowError("request body is too large")
-        if length and not self.headers.get("Content-Type", "").split(";", 1)[0].lower() == "application/json":
-            raise ValueError("JSON content type is required")
         if not length:
             return {}
+        if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+            raise ValueError("JSON content type is required")
         raw = self.rfile.read(length)
+        if len(raw) != length:
+            raise ValueError("request body is incomplete")
         try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError as error:
+            return json.loads(raw)
+        except (ValueError, RecursionError) as error:
             raise ValueError("JSON body is invalid") from error
-        return payload
 
     def run_command(self, args, timeout=300, extra_env=None, encoding=None):
         environment = {**os.environ, "UU_JOB_STATE_DIR": str(self.server.jobs_dir)}
@@ -2027,8 +2117,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             "check": False,
             "env": environment,
         }
-        if encoding:
-            options.update(encoding=encoding, errors="replace")
+        options.update(encoding=encoding or "utf-8", errors="replace")
         return subprocess.run(args, **options)
 
     def jobs(self):
@@ -2569,6 +2658,8 @@ class StatusHandler(BaseHTTPRequestHandler):
                     self.send_json(error_payload("TARGET_NOT_FOUND", "That external target does not exist."), HTTPStatus.NOT_FOUND)
                     return
             else:
+                if not isinstance(payload, dict):
+                    raise ValueError("The connection test payload must be an object.")
                 candidate = dict(payload)
                 candidate["id"] = target_id
                 target = validate_target_payload(candidate, target_id)
@@ -2750,6 +2841,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             response["skipped"] = errors
         self.send_json(response, HTTPStatus.ACCEPTED)
 
+    @guarded_request
     def do_GET(self):
         path = urlsplit(self.path).path
         if path in ("/", "/overview", "/settings", "/scheduler"):
@@ -2922,6 +3014,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             return
         self.send_json(error_payload("NOT_FOUND", "Not found."), HTTPStatus.NOT_FOUND)
 
+    @guarded_request
     def do_POST(self):
         try:
             payload = self.read_body()
@@ -2972,6 +3065,8 @@ class StatusHandler(BaseHTTPRequestHandler):
                 self.handle_scheduler_run(parts[2])
             except KeyError:
                 self.send_json(error_payload("SCHEDULE_NOT_FOUND", "That schedule does not exist."), HTTPStatus.NOT_FOUND)
+            except subprocess.TimeoutExpired:
+                self.send_json(error_payload("SCHEDULE_RUN_FAILED", "The schedule did not start in time."), HTTPStatus.GATEWAY_TIMEOUT)
             except (OSError, RuntimeError, ValueError) as error:
                 status = HTTPStatus.CONFLICT if "conflicting" in str(error).lower() else HTTPStatus.UNPROCESSABLE_ENTITY
                 self.send_json(error_payload("SCHEDULE_RUN_FAILED", str(error) or "Schedule could not be started."), status)
@@ -3229,12 +3324,16 @@ class StatusHandler(BaseHTTPRequestHandler):
             return
         self.send_json({"node": node, "job": job_unit, "state": "running", "message": "Node update job started."}, HTTPStatus.ACCEPTED)
 
+    @guarded_request
     def do_PUT(self):
         if not self.write_allowed():
             return
         try:
             payload = self.read_body()
-        except (OverflowError, ValueError) as error:
+        except OverflowError as error:
+            self.send_json(error_payload("REQUEST_TOO_LARGE", str(error)), HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+            return
+        except ValueError as error:
             self.send_json(error_payload("BAD_REQUEST", str(error)), HTTPStatus.BAD_REQUEST)
             return
         parts = [unquote(part) for part in urlsplit(self.path).path.split("/") if part]
@@ -3254,12 +3353,17 @@ class StatusHandler(BaseHTTPRequestHandler):
             return
         self.send_json(error_payload("METHOD_NOT_ALLOWED", "Only defined configuration actions are available."), HTTPStatus.METHOD_NOT_ALLOWED)
 
+    @guarded_request
     def do_DELETE(self):
         if not self.write_allowed():
             return
         parts = [unquote(part) for part in urlsplit(self.path).path.split("/") if part]
         if len(parts) == 3 and parts[:2] == ["api", "schedules"]:
-            schedules = self.scheduler_read()
+            try:
+                schedules = self.scheduler_read()
+            except (OSError, ValueError, RuntimeError):
+                self.send_json(error_payload("SCHEDULER_UNAVAILABLE", "Scheduler data is unavailable."), HTTPStatus.SERVICE_UNAVAILABLE)
+                return
             current = next((item for item in schedules if item["id"] == parts[2]), None)
             if current is None:
                 self.send_json(error_payload("SCHEDULE_NOT_FOUND", "That schedule does not exist."), HTTPStatus.NOT_FOUND)
@@ -3327,10 +3431,7 @@ def main():
     except TLSConfigurationError as error:
         print(f"WebUI TLS configuration error: {error}", flush=True)
         raise SystemExit(78) from None
-    server = ThreadingHTTPServer((args.bind, args.port), StatusHandler)
-    server.tls_enabled = tls_context is not None
-    if tls_context is not None:
-        server.socket = tls_context.wrap_socket(server.socket, server_side=True)
+    server = UpdaterServer((args.bind, args.port), StatusHandler, tls_context=tls_context)
     server.status_file, server.cli = args.status_file, args.cli
     server.config_file, server.inventory_file = args.config_file, args.inventory_file
     server.internal_ssh_file = args.config_file.parent / "internal-ssh.conf"
