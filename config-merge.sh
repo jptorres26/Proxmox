@@ -23,7 +23,7 @@ CONFIG_MERGE_VALIDATE () {
       sq = sprintf("%c", 39)
       double_value = "^\\\"([^\\\"\\\\]|\\\\.)*\\\"[[:space:]]*(#.*)?$"
       single_value = "^" sq "([^" sq "\\\\]|\\\\.)*" sq "[[:space:]]*(#.*)?$"
-      bare_value = "^[^[:space:]#\\\"" sq "]+[[:space:]]*(#.*)?$"
+      bare_value = "^[^[:space:]#\\\"" sq "]*[[:space:]]*(#.*)?$"
     }
     match($0, /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=/) {
       line = substr($0, RSTART)

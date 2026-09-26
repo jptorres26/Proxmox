@@ -241,7 +241,9 @@ apply_only_exclude_tags() {
       [[ -f $f ]] || continue
       id="$(basename "$f" .conf)"; [[ $id =~ ^[0-9]+$ ]] || continue
       # Capture the first tags line (if any)
-      tline=$(grep -i '^tags:' "$f" 2>/dev/null | head -n1 || true)
+      # The current configuration only: [snapshot] and [PENDING] sections
+      # follow it and may carry old tags.
+      tline=$(awk '/^\[/ {exit} tolower($0) ~ /^tags:/ {print; exit}' "$f" 2>/dev/null || true)
       [[ -n $tline ]] || continue
       tags=${tline#*:}
       # Lowercase + translate ; , | to spaces
@@ -299,21 +301,23 @@ apply_only_exclude_tags() {
     # Replace delimiters with spaces
     normalized=$(echo "$raw" | tr ',;|' '   ')
     # shellcheck disable=SC2206
-    local tokens=( $normalized )
+    local -a tokens=()
+    read -r -a tokens <<< "$normalized"
     local numbers=() tag_tokens=() t start end n
     for t in "${tokens[@]}"; do
-      if [[ $t =~ ^[0-9]+$ ]]; then
-        numbers+=("$t")
+      if [[ $t =~ ^[0-9]{1,9}$ ]]; then
+        numbers+=("$((10#$t))")
         continue
       fi
-      if [[ $t =~ ^([0-9]+)-([0-9]+)$ ]]; then
-        start=${BASH_REMATCH[1]} end=${BASH_REMATCH[2]}
-        if (( start <= end )); then
-          for (( n=start; n<=end; n++ )); do numbers+=("$n"); done
-        else
-          # If reversed range, swap (user convenience)
-          for (( n=end; n<=start; n++ )); do numbers+=("$n"); done
+      if [[ $t =~ ^([0-9]{1,9})-([0-9]{1,9})$ ]]; then
+        start=$((10#${BASH_REMATCH[1]})) end=$((10#${BASH_REMATCH[2]}))
+        # A reversed range is swapped (user convenience).
+        (( start <= end )) || { n=$start; start=$end; end=$n; }
+        if (( end - start > 10000 )); then
+          printf 'Range %s spans more than 10000 IDs and was ignored\n' "$t" >&2
+          continue
         fi
+        for (( n=start; n<=end; n++ )); do numbers+=("$n"); done
         continue
       fi
         # Tag token (case-insensitive user input) -> store lowercase

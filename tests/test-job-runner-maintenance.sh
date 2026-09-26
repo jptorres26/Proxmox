@@ -102,4 +102,38 @@ UU_JOB_STATE_DIR="$STALE" PATH="$WORK_DIR/bin:$PATH" UU_LOCAL_FILES="$WORK_DIR" 
   UU_CHECK_CLI="$WORK_DIR/missing-cli" bash "$RUNNER" list >/dev/null 2>&1
 [[ "$(stat -c '%i %Y' "$WORK_DIR/status.json")" == "$before" ]] || { echo 'unchanged status.json was rewritten' >&2; exit 1; }
 
+# --- remote hosts never start with "-" (they are ssh arguments) --------------
+eval "$(sed -n '/^valid_remote_value() {/,/^}/p' "$RUNNER")"
+valid_remote_value 192.0.2.2 && valid_remote_value pve-2.lan
+! valid_remote_value -oProxyCommand=x && ! valid_remote_value ''
+
+# --- a self-update conflicts with every running job and vice versa -----------
+eval "$(sed -n '/^state_value() {/,/^}/p' "$RUNNER")"
+eval "$(sed -n '/^running_job_conflict() {/,/^}/p' "$RUNNER")"
+CONFLICT="$WORK_DIR/conflict"
+mkdir -p "$CONFLICT"
+JOB_STATE_DIR=$CONFLICT
+printf 'unit=ultimate-updater-update-101-x\ntarget=101\nstate=running\n' > "$CONFLICT/a.state"
+running_job_conflict selfupdate >/dev/null || { echo 'self-update started during a target job' >&2; exit 1; }
+printf 'unit=ultimate-updater-update-selfupdate-x\ntarget=selfupdate\nstate=running\n' > "$CONFLICT/a.state"
+running_job_conflict 102 >/dev/null || { echo 'target job started during a self-update' >&2; exit 1; }
+printf 'unit=ultimate-updater-update-103-x\ntarget=103\nstate=running\n' > "$CONFLICT/a.state"
+if running_job_conflict 104 >/dev/null; then echo 'unrelated targets conflict' >&2; exit 1; fi
+
+# --- the payload does not inherit the target lock ----------------------------
+LOCKS="$WORK_DIR/locks"
+mkdir -p "$LOCKS"
+cat > "$WORK_DIR/payload.sh" <<PAYLOAD
+#!/bin/bash
+if [[ -e /proc/self/fd/9 ]]; then echo inherited; else echo closed; fi > "$WORK_DIR/payload-fd"
+PAYLOAD
+chmod +x "$WORK_DIR/payload.sh"
+UU_JOB_STATE_DIR="$LOCKS" PATH="$WORK_DIR/bin:$PATH" UU_LOCAL_FILES="$WORK_DIR" \
+  bash "$RUNNER" run ultimate-updater-update-host-fd host "$WORK_DIR/payload.sh" >/dev/null
+[[ "$(cat "$WORK_DIR/payload-fd")" == closed ]] || { echo 'the payload inherited the target lock fd' >&2; exit 1; }
+if UU_JOB_STATE_DIR="$LOCKS" bash "$RUNNER" run 'bad unit' host "$WORK_DIR/payload.sh" >/dev/null 2>&1; then
+  echo 'run accepted an invalid unit' >&2
+  exit 1
+fi
+
 echo 'job runner maintenance: PASS'

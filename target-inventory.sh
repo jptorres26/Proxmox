@@ -38,8 +38,8 @@ TARGET_INVENTORY_LOAD() {
 
   # An absent inventory is the compatibility default for existing installs.
   [[ -e "$file" ]] || return 0
-  [[ -f "$file" ]] || TARGET_INVENTORY_FAIL "$file is not a regular file"
-  [[ -r "$file" ]] || TARGET_INVENTORY_FAIL "$file is not readable"
+  [[ -f "$file" ]] || { TARGET_INVENTORY_FAIL "$file is not a regular file"; return 1; }
+  [[ -r "$file" ]] || { TARGET_INVENTORY_FAIL "$file is not readable"; return 1; }
 
   section=""
   number=0

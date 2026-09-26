@@ -19,8 +19,10 @@ ONLY_UPDATE_CHECK
 EXCLUDE_UPDATE_CHECK
 ```
 
-`ONLY` takes precedence over its matching `EXCLUDE`. Filters accept VMIDs,
-ranges, and configured tags; check and update selections are independent.
+When `ONLY` is set, only the listed systems are considered; `EXCLUDE` still
+applies to them, so a system in both lists is skipped. Filters accept VMIDs,
+ranges such as `100-110` (at most 10000 IDs), and Proxmox tags, separated by
+spaces, commas, or semicolons; check and update selections are independent.
 
 ## Updates and lifecycle
 

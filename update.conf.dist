@@ -97,7 +97,7 @@ INCLUDE_HELPER_SCRIPTS="true"
 │          Only/Exclude LXC and/or VM          │
 │          also used for dist-upgrade          │
 │     - Usage: see docs/configuration.md -     │
-│  ! If 'ONLY' is set, 'EXCLUDE' is ignored !  │
+│    EXCLUDE wins over ONLY for the same ID    │
 └──────────────────────────────────────────────┘
 
 ONLY=""
@@ -167,7 +167,7 @@ CHECK_RUNNING_VM="true"
 ┌──────────────────────────────────────────────┐
 │          Only/Exclude LXC and/or VM          │
 │     - Usage: see docs/configuration.md -     │
-│  ! If 'ONLY' is set, 'EXCLUDE' is ignored !  │
+│    EXCLUDE wins over ONLY for the same ID    │
 └──────────────────────────────────────────────┘
 
 ONLY_UPDATE_CHECK=""

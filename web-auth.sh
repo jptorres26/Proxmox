@@ -16,9 +16,9 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
-read -r -s -p 'Password: ' PASSWORD
+IFS= read -r -s -p 'Password: ' PASSWORD
 printf '\n' >&2
-read -r -s -p 'Repeat password: ' PASSWORD_REPEAT
+IFS= read -r -s -p 'Repeat password: ' PASSWORD_REPEAT
 printf '\n' >&2
 if [[ -z "$PASSWORD" || "$PASSWORD" != "$PASSWORD_REPEAT" || "${#PASSWORD}" -lt 12 ]]; then
   printf 'web-auth: passwords must match and contain at least 12 characters\n' >&2

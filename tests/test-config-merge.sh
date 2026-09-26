@@ -39,6 +39,13 @@ grep -Fqx 'NEW_OPTION=true' "$WORK_DIR/user.conf"
 grep -Fqx '# Proxmox storage ID used for backups.' "$WORK_DIR/user.conf"
 [[ $(grep -c '^BACKUP_STORAGE=' "$WORK_DIR/user.conf") -eq 1 ]]
 
+# A hand-edited bare empty value (EXCLUDE=) is valid; it used to make every
+# self-update fail with "Configuration migration failed".
+printf 'VERSION="2.0"\nEXCLUDE=\nEMPTY_COMMENTED= # none\n' > "$WORK_DIR/bare.conf"
+MERGE_UPDATE_CONFIG "$WORK_DIR/bare.conf" "$WORK_DIR/default.conf"
+grep -Fqx 'EXCLUDE=' "$WORK_DIR/bare.conf"
+grep -Fqx 'VERSION="2.1"' "$WORK_DIR/bare.conf"
+
 first_hash=$(sha256sum "$WORK_DIR/user.conf" | awk '{print $1}')
 MERGE_UPDATE_CONFIG "$WORK_DIR/user.conf" "$WORK_DIR/default.conf"
 second_hash=$(sha256sum "$WORK_DIR/user.conf" | awk '{print $1}')

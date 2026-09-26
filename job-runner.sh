@@ -145,7 +145,7 @@ valid_unit() {
 }
 
 valid_remote_value() {
-  [[ -n "$1" && "$1" != *[!A-Za-z0-9_.:-]* ]]
+  [[ -n "$1" && "$1" != -* && "$1" != *[!A-Za-z0-9_.:-]* ]]
 }
 
 write_remote_ref() {
@@ -365,7 +365,10 @@ running_job_conflict() {
     target=$(state_value "$file" target)
     state=$(state_value "$file" state)
     [[ "$state" == running ]] || continue
-    if [[ "$requested" == all-systems || "$target" == all-systems || "$target" == "$requested" ]]; then
+    # A self-update replaces the scripts every other job runs: it conflicts
+    # with everything, like all-systems.
+    if [[ "$requested" == all-systems || "$requested" == selfupdate ||
+      "$target" == all-systems || "$target" == selfupdate || "$target" == "$requested" ]]; then
       printf '%s\t%s\n' "$target" "$(state_value "$file" unit)"
       return 0
     fi
@@ -554,6 +557,7 @@ start_global_job() {
 run_job() {
   local unit="$1" target="$2" update_script="$3" file started exit_code lock_file
   local post_check_rc=0 post_check_message="" captured_status_file captured_status_rc
+  valid_unit "$unit" || return 2
   valid_target "$target" || return 2
   file=$(state_file "$unit")
   started=$(state_value "$file" started_at)
@@ -570,7 +574,7 @@ run_job() {
     write_state "$unit" "$target" failed "$started" "$(now)" 75 "target update already locked"
     return 75
   fi
-  UU_DEFER_UPDATE_MAIL=true "$update_script" "$target" </dev/null
+  UU_DEFER_UPDATE_MAIL=true "$update_script" "$target" </dev/null 9>&-
   exit_code=$?
   if [[ "$exit_code" -eq 0 ]]; then
     captured_status_file="${UU_REMOTE_WORK_DIR:-${UU_LOCAL_FILES:-/etc/ultimate-updater}/temp}/post-update-status.rc"
@@ -632,7 +636,9 @@ run_job() {
   else
     write_state "$unit" "$target" failed "$started" "$(now)" "$exit_code" || return 1
   fi
-  if [[ -n "${UU_REMOTE_WORK_DIR:-}" && ( ! "$target" =~ ^[0-9]+$ || ! -f "$UU_REMOTE_WORK_DIR/post-update-status.rc" ) ]]; then
+  # Only the work directory the CLI creates for a remote node job.
+  if [[ "${UU_REMOTE_WORK_DIR:-}" =~ ^/tmp/ultimate-updater-update-node-[0-9]+-[0-9]+-[0-9]+$ &&
+    ( ! "$target" =~ ^[0-9]+$ || ! -f "$UU_REMOTE_WORK_DIR/post-update-status.rc" ) ]]; then
     rm -rf -- "$UU_REMOTE_WORK_DIR"
   fi
   return "$exit_code"
@@ -658,7 +664,7 @@ run_global_job() {
     write_state "$unit" "$target" failed "$started" "$(now)" 75 "another global update is running"
     return 75
   fi
-  UU_DEFER_UPDATE_MAIL=true "$update_script"
+  UU_DEFER_UPDATE_MAIL=true "$update_script" </dev/null 9>&-
   exit_code=$?
   if [[ "$exit_code" -eq 0 ]]; then
     printf 'Post-update status refresh started for all systems.\n'
@@ -754,7 +760,7 @@ run_selfupdate_job() {
     UU_JOB_TYPE=selfupdate write_state "$unit" "$target" failed "$started" "$(now)" 75 "another self-update is running"
     return 75
   fi
-  "$update_script" "$branch" -up </dev/null
+  "$update_script" "$branch" -up </dev/null 9>&-
   exit_code=$?
   if [[ "$exit_code" -eq 0 ]]; then
     UU_JOB_TYPE=selfupdate UU_JOB_SOURCE=web-selfupdate write_state "$unit" "$target" completed "$started" "$(now)" "$exit_code" || return 1
@@ -778,9 +784,9 @@ run_check_job() {
     return 75
   fi
   case "$mode" in
-    target) UU_CHECK_JOB_EXECUTION=true "$cli" check "$target" </dev/null ;;
-    node) UU_CHECK_JOB_EXECUTION=true "$cli" check-node "$target" </dev/null ;;
-    all) UU_CHECK_JOB_EXECUTION=true "$cli" check </dev/null ;;
+    target) UU_CHECK_JOB_EXECUTION=true "$cli" check "$target" </dev/null 9>&- ;;
+    node) UU_CHECK_JOB_EXECUTION=true "$cli" check-node "$target" </dev/null 9>&- ;;
+    all) UU_CHECK_JOB_EXECUTION=true "$cli" check </dev/null 9>&- ;;
   esac
   exit_code=$?
   if [[ "$mode" != target && "$exit_code" -eq "$CHECK_WARNING_RC" ]]; then
