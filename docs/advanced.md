@@ -54,8 +54,10 @@ manually with `/etc/ultimate-updater/check-updates.sh`.
 ## Exit tracking
 
 Commands placed in `/etc/ultimate-updater/exit` can be used for configured
-success or failure follow-up actions. Keep these commands local, reviewed,
-and free of credentials.
+success or failure follow-up actions: `passed.sh` runs after a successful
+update and `error.sh` after a failed one. Keep these commands local,
+reviewed, and free of credentials. A self-update keeps a hook you changed and
+puts the new default next to it as `passed.sh.dist` or `error.sh.dist`.
 
 ## Debugging
 

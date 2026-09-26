@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Self-update copies every "*.* **/*.*" file that survives the payload cleanup
+# Self-update copies every "*.* */*.*" file that survives the payload cleanup
 # into /etc/ultimate-updater. Run the installer's real cleanup statements
 # against a copy of the repository and make sure no repository-only file
 # (documentation, tests, CI and lint configuration) would be installed.
@@ -34,29 +34,27 @@ TEMP_FILES="$payload"
 WEB_SERVICE_NAME="ultimate-updater-web.service"
 eval "$cleanup_code"
 
+# Run the installer's own loop, with CHECK_DIFF listing what it would install.
+sed -n '/^INSTALL_PAYLOAD_FILES () {/,/^}/p' "$INSTALLER" > "$WORK_DIR/install-loop.sh"
+grep -q '^INSTALL_PAYLOAD_FILES () {' "$WORK_DIR/install-loop.sh"
+mkdir -p "$WORK_DIR/etc"
 installed=()
 (
   cd "$payload"
-  # Mirror the installer loop, including its exclusions.
-  FILES="*.* **/*.*"
-  for FILE in $FILES; do
-    [[ -e "$FILE" ]] || continue
-    [[ "$FILE" == targets.conf ]] && continue
-    case "$FILE" in
-      docs|docs/*|RELEASE_NOTES_5.1.md|UPGRADE_NOTES_5.1.md|CONTRIBUTING.md|requirements-dev.txt|ruff.toml) continue ;;
-    esac
-    printf '%s\n' "$FILE"
-  done
+  # shellcheck disable=SC1091
+  source "$WORK_DIR/install-loop.sh"
+  # shellcheck disable=SC2034 # read by INSTALL_PAYLOAD_FILES.
+  LOCAL_FILES="$WORK_DIR/etc"
+  # shellcheck disable=SC2153,SC2329 # called by INSTALL_PAYLOAD_FILES, which sets FILE.
+  CHECK_DIFF() { printf '%s\n' "$FILE"; }
+  INSTALL_PAYLOAD_FILES
 ) > "$WORK_DIR/installed"
 mapfile -t installed < "$WORK_DIR/installed"
-
-# The loop exclusions above must stay in sync with install.sh.
-grep -Fq 'docs|docs/*|RELEASE_NOTES_5.1.md|UPGRADE_NOTES_5.1.md|CONTRIBUTING.md|requirements-dev.txt|ruff.toml) continue ;;' "$INSTALLER"
 
 ((${#installed[@]} > 0))
 for file in "${installed[@]}"; do
   case "$file" in
-    *.md | tests/* | docs/* | .github/* | ruff.toml | requirements-dev.txt | *.png)
+    *.md | tests/* | docs/* | .github/* | ruff.toml | requirements-dev.txt | *.png | targets.conf)
       printf 'repository-only file would be installed: %s\n' "$file" >&2
       exit 1
       ;;
