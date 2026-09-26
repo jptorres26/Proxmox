@@ -795,7 +795,10 @@ UPDATE () {
       local payload_root="$1"
       rm -rf -- "$payload_root/docs" || true
       rm -f -- "$payload_root/RELEASE_NOTES_5.1.md" \
-        "$payload_root/UPGRADE_NOTES_5.1.md" || true
+        "$payload_root/UPGRADE_NOTES_5.1.md" \
+        "$payload_root/CONTRIBUTING.md" \
+        "$payload_root/requirements-dev.txt" \
+        "$payload_root/ruff.toml" || true
     }
     # Project documentation remains in the repository, but is not part of
     # the installed runtime payload.
@@ -814,7 +817,7 @@ UPDATE () {
     do
      [[ "$FILE" == targets.conf ]] && continue
      case "$FILE" in
-       docs|docs/*|RELEASE_NOTES_5.1.md|UPGRADE_NOTES_5.1.md) continue ;;
+       docs|docs/*|RELEASE_NOTES_5.1.md|UPGRADE_NOTES_5.1.md|CONTRIBUTING.md|requirements-dev.txt|ruff.toml) continue ;;
      esac
      CHECK_DIFF
     done
