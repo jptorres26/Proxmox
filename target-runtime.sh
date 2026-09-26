@@ -40,7 +40,9 @@ RUN_SSH_COMMAND() {
   local host="$1" port="$2" user="$3"
   shift 3
   local identity_file="${RUN_SSH_IDENTITY_FILE:-}"
-  local -a ssh_options=(-q -o BatchMode=yes -o ConnectTimeout=5)
+  # Keepalives detect a dead peer within about two minutes, independent of
+  # the overall command timeout.
+  local -a ssh_options=(-q -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=30 -o ServerAliveCountMax=4)
   if [[ -n "$identity_file" ]]; then
     ssh_options+=(-o IdentitiesOnly=yes -i "$identity_file")
   fi
