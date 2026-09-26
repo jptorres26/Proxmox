@@ -117,7 +117,7 @@ and limitations in [Supported systems](docs/supported-systems.md) and
 - [Upgrading](docs/upgrading.md)
 - [Advanced operation](docs/advanced.md)
 
-Additional project documents: [Testing](TESTING.md), [5.1 release notes](RELEASE_NOTES_5.1.md), [5.1 upgrade notes](UPGRADE_NOTES_5.1.md), [security policy](SECURITY.md), and [code of conduct](CODE_OF_CONDUCT.md).
+Additional project documents: [Contributing](CONTRIBUTING.md), [Testing](TESTING.md), [5.1 release notes](RELEASE_NOTES_5.1.md), [5.1 upgrade notes](UPGRADE_NOTES_5.1.md), [security policy](SECURITY.md), and [code of conduct](CODE_OF_CONDUCT.md).
 
 ## Q&A
 
