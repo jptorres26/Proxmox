@@ -138,6 +138,16 @@ SANITIZE_NUMBER() {
   echo "$1" | tr -cd '0-9'
 }
 
+# Validate a package count printed by a guest before any arithmetic touches
+# it. Bash evaluates the operands of [[ -gt ]] and (( )) as expressions,
+# including array subscripts, so guest output such as 'x[$(cmd)]' would run
+# cmd as root on the host.
+GUEST_COUNT() {
+  local value="${1//[[:space:]]/}"
+  [[ "$value" =~ ^[0-9]{1,9}$ ]] || return 1
+  printf '%s\n' "$((10#$value))"
+}
+
 # Keep check output aligned with the canonical status fields.  A package
 # manager may provide a total or normal count without a reliable security
 # classification; never render that missing value as an empty half-line.
@@ -985,24 +995,28 @@ CHECK_CONTAINER () {
       CHECK_CONTAINER_FAILURE "dnf check-update failed for LXC $CONTAINER"
       return
     fi
-    CONTAINER_UPDATES=$(SANITIZE_NUMBER "$UPDATES")
-    CONTAINER_UPDATES=${CONTAINER_UPDATES:-0}
+    if ! CONTAINER_UPDATES=$(GUEST_COUNT "$UPDATES"); then
+      CHECK_CONTAINER_FAILURE "Unexpected update count reported by LXC $CONTAINER"
+      return
+    fi
     CONTAINER_NORMAL_UPDATES=$CONTAINER_UPDATES
-    if [[ "$UPDATES" -gt 0 ]]; then
+    if [[ "$CONTAINER_UPDATES" -gt 0 ]]; then
       echo -e "${GN}LXC ${BL}$CONTAINER${CL} : ${GN}$NAME${CL}"
-      echo -e "$UPDATES"
+      printf '%s\n' "$CONTAINER_UPDATES"
     fi
   elif [[ "$OS" =~ archlinux ]]; then
     if ! UPDATES=$(RUN_PCT_COMMAND "$CONTAINER" bash -c "pacman -Qu | wc -l"); then
       CHECK_CONTAINER_FAILURE "pacman query failed for LXC $CONTAINER"
       return
     fi
-    CONTAINER_UPDATES=$(SANITIZE_NUMBER "$UPDATES")
-    CONTAINER_UPDATES=${CONTAINER_UPDATES:-0}
+    if ! CONTAINER_UPDATES=$(GUEST_COUNT "$UPDATES"); then
+      CHECK_CONTAINER_FAILURE "Unexpected update count reported by LXC $CONTAINER"
+      return
+    fi
     CONTAINER_NORMAL_UPDATES=$CONTAINER_UPDATES
-    if [[ "$UPDATES" -gt 0 ]]; then
+    if [[ "$CONTAINER_UPDATES" -gt 0 ]]; then
       echo -e "${GN}LXC ${BL}$CONTAINER${CL} : ${GN}$NAME${CL}"
-      echo -e "$UPDATES"
+      printf '%s\n' "$CONTAINER_UPDATES"
     fi
   elif [[ "$OS" =~ alpine ]]; then
     if ! RUN_PCT_COMMAND "$CONTAINER" ash -c "apk update" >/dev/null 2>&1; then
@@ -1013,24 +1027,28 @@ CHECK_CONTAINER () {
       CHECK_CONTAINER_FAILURE "apk query failed for LXC $CONTAINER"
       return
     fi
-    CONTAINER_UPDATES=$(SANITIZE_NUMBER "$UPDATES")
-    CONTAINER_UPDATES=${CONTAINER_UPDATES:-0}
+    if ! CONTAINER_UPDATES=$(GUEST_COUNT "$UPDATES"); then
+      CHECK_CONTAINER_FAILURE "Unexpected update count reported by LXC $CONTAINER"
+      return
+    fi
     CONTAINER_NORMAL_UPDATES=$CONTAINER_UPDATES
-    if [[ "$UPDATES" -gt 0 ]]; then
+    if [[ "$CONTAINER_UPDATES" -gt 0 ]]; then
       echo -e "${GN}LXC ${BL}$CONTAINER${CL} : ${GN}$NAME${CL}"
-      echo -e "$UPDATES"
+      printf '%s\n' "$CONTAINER_UPDATES"
     fi
   else
     if ! UPDATES=$(RUN_PCT_COMMAND "$CONTAINER" bash -c "yum -q check-update | wc -l"); then
       CHECK_CONTAINER_FAILURE "yum check-update failed for LXC $CONTAINER"
       return
     fi
-    CONTAINER_UPDATES=$(SANITIZE_NUMBER "$UPDATES")
-    CONTAINER_UPDATES=${CONTAINER_UPDATES:-0}
+    if ! CONTAINER_UPDATES=$(GUEST_COUNT "$UPDATES"); then
+      CHECK_CONTAINER_FAILURE "Unexpected update count reported by LXC $CONTAINER"
+      return
+    fi
     CONTAINER_NORMAL_UPDATES=$CONTAINER_UPDATES
-    if [[ "$UPDATES" -gt 0 ]]; then
+    if [[ "$CONTAINER_UPDATES" -gt 0 ]]; then
       echo -e "${GN}LXC ${BL}$CONTAINER${CL} : ${GN}$NAME${CL}"
-      echo -e "$UPDATES"
+      printf '%s\n' "$CONTAINER_UPDATES"
     fi
   fi
   [[ "$CONTAINER_UPDATES" -gt 0 ]] && CONTAINER_STATUS=updates_available
