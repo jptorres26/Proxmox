@@ -152,7 +152,7 @@ RUN_DOWNLOADED_INSTALLER() {
 
 # Header
 HEADER_INFO () {
-  clear
+  clear 2>/dev/null || true
   echo -e "\n \
     https://github.com/BassT23/Proxmox\n"
   cat <<'EOF'
