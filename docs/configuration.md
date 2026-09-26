@@ -26,7 +26,8 @@ spaces, commas, or semicolons; check and update selections are independent.
 
 ## Updates and lifecycle
 
-`REBOOT_IF_NEEDED` controls reboot handling for updates, not checks. Guest
+`REBOOT_IF_NEEDED` is reserved: updates report "reboot required" but never
+reboot a host or guest automatically. Guest
 start/resume behavior is controlled separately for LXC and VM targets.
 `EXIT_ON_ERROR="false"` (the default, "Continue after errors" in the Web UI)
 moves on to the next system after an error; `true` skips the remaining

@@ -408,7 +408,7 @@ WAIT_FOR_QGA () {
       now=$(date +%s)
       elapsed=$((now - started_at))
       if [[ "${DEBUG:-false}" == true ]]; then
-        echo -e "${GR}✅ QEMU Guest Agent ready after ${elapsed} seconds${CL}"
+        echo -e "${GN}✅ QEMU Guest Agent ready after ${elapsed} seconds${CL}"
       fi
       return 0
     fi
@@ -974,7 +974,7 @@ CHECK_CONTAINER () {
     NAME=$(awk -F': ' '$1 == "hostname" {print $2; exit}' <<< "$pct_config")
     NAME="${NAME:-$STATUS_MODEL_GUEST_NAME}"
     NAME="${NAME:-$CONTAINER}"
-    echo -e "${YL}Could not read hostname for LXC $CONTAINER; using ${NAME} as display name and continuing${CL}"
+    echo -e "${OR}Could not read hostname for LXC $CONTAINER; using ${NAME} as display name and continuing${CL}"
   fi
   NAME=$(printf '%s' "$NAME" | tr '\n' ' ' | sed 's/[[:space:]]\+$//')
   if [[ "${INITIAL_INVENTORY:-false}" == true ]] &&

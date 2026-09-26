@@ -879,8 +879,8 @@ remote_target_check() {
   fi
   if ! timeout "${UU_CHECK_SSH_COMMAND_TIMEOUT:-15}" scp -q "${ssh_args[@]}" -P "$port" \
       "$internal_ssh_file" "$user@$host:$remote_internal_ssh" ||
-    [[ -f "$internal_ssh_conf" ]] && ! timeout "${UU_CHECK_SSH_COMMAND_TIMEOUT:-15}" scp -q "${ssh_args[@]}" -P "$port" \
-      "$internal_ssh_conf" "$user@$host:$remote_internal_conf"; then
+    { [[ -f "$internal_ssh_conf" ]] && ! timeout "${UU_CHECK_SSH_COMMAND_TIMEOUT:-15}" scp -q "${ssh_args[@]}" -P "$port" \
+      "$internal_ssh_conf" "$user@$host:$remote_internal_conf"; }; then
     timeout "${UU_CHECK_SSH_COMMAND_TIMEOUT:-15}" ssh "${ssh_args[@]}" -p "$port" "$user@$host" \
       "rm -rf -- '$remote_check_dir'" >/dev/null 2>&1 || true
     STATUS_MODEL_RECORD "$target" "$kind" ssh false "" "" null null offline SSH_UNREACHABLE "Could not transfer Internal SSH files to node $node" "$node"

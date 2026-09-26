@@ -1125,7 +1125,7 @@ DIST_UPGRADE () {
         ERROR
         return 1
       fi
-      echo -e "${GR:-}⏩ Upgrade to Debian 13 (Trixie) now:${CL:-}"
+      echo -e "${GN:-}⏩ Upgrade to Debian 13 (Trixie) now:${CL:-}"
       echo -e "${OR:-}--- Enable stop on error ---\n${CL:-}"
       set -e
       echo -e "${OR:-}--- APT UPDATE ---${CL:-}"
@@ -1156,7 +1156,7 @@ DIST_UPGRADE () {
           pct exec "$CONTAINER" -- bash -c "apt-get update -y"
           echo -e "${OR:-}--- APT UPGRADE for Trixie ---${CL:-}"
           pct exec "$CONTAINER" -- bash -c "apt-get $DPKG_OPTIONS_STRING dist-upgrade -y"
-          echo -e "\n${GR:-}✅ UPGRADE to Trixie done ${CL:-}"
+          echo -e "\n${GN:-}✅ UPGRADE to Trixie done ${CL:-}"
           echo -e "\n${OR:-}--- Restart the container now for you ---${CL:-}"
           pct exec "$CONTAINER" -- bash -c "reboot"
           echo
@@ -1440,9 +1440,30 @@ UPDATE_HOST () {
   return "${REMOTE_UPDATE_STATUS:-0}"
 }
 
+# A Proxmox VE major upgrade (for example 8 -> 9 once the repositories
+# point to the next release) needs the documented manual procedure: the
+# pveXtoY checklist and the release notes. An unattended dist-upgrade must
+# not start it. Succeeds when the simulation raises pve-manager's major.
+HOST_MAJOR_UPGRADE_PENDING () {
+  apt-get -s dist-upgrade 2>/dev/null | awk '
+    $1 == "Inst" && $2 == "pve-manager" && match($0, /\[[0-9]+\./) {
+      old = substr($0, RSTART + 1, RLENGTH - 2) + 0
+      if (match($0, /\([0-9]+\./) && substr($0, RSTART + 1, RLENGTH - 2) + 0 > old) found = 1
+    }
+    END { exit !found }'
+}
+
 UPDATE_HOST_ITSELF () {
   NAME=$HOSTNAME
   echo -e "${OR:-}--- PVE UPDATE ---${CL:-}" && pveupdate || true
+  if [[ "${UU_ALLOW_MAJOR_UPGRADE:-false}" != true ]] && HOST_MAJOR_UPGRADE_PENDING; then
+    echo -e "${RD:-}❌ A Proxmox VE major upgrade is pending; the host update was not started.${CL:-}\n"
+    ERROR_CODE=1
+    ID=$HOSTNAME
+    ERROR_MSG="Proxmox VE major upgrade pending (pve-manager): follow the official upgrade guide, or set UU_ALLOW_MAJOR_UPGRADE=true"
+    ERROR
+    return
+  fi
   if [[ "$HEADLESS" == true ]]; then
     echo -e "\n${OR:-}--- APT UPGRADE HEADLESS ---${CL:-}" && \
     RUN_STEP "$HOSTNAME" env DEBIAN_FRONTEND=noninteractive apt-get "${DPKG_OPTIONS[@]}" dist-upgrade -y
@@ -1491,6 +1512,7 @@ RESET_TARGET_STATE () {
 
 CONTAINER_UPDATE_START () {
   local pct_list
+  local -a shutdown_pids=()
   # A failed listing used to look like "no containers" and a successful run.
   if ! pct_list=$(pct list); then
     echo -e "❌${RD:-} Could not list the containers of this node${CL:-}\n"
@@ -1532,6 +1554,7 @@ CONTAINER_UPDATE_START () {
         # Stop the container
         echo -e "⏹ ${GN:-} Shutting down LXC ${BL:-}$CONTAINER ${CL:-}\n\n"
         RUN_PROXMOX_COMMAND pct shutdown "$CONTAINER" &
+        shutdown_pids+=("$!")
         WILL_STOP="false"
       elif [[ "$STATUS" == "status: stopped" && "$STOPPED_CONTAINER" != true ]]; then
         echo -e "⏩${BL:-} Skipped LXC $CONTAINER by the user${CL:-}\n\n"
@@ -1546,6 +1569,9 @@ CONTAINER_UPDATE_START () {
       fi
     fi
   done
+  if ((${#shutdown_pids[@]})); then
+    wait "${shutdown_pids[@]}" || true
+  fi
 }
 
 # Container Update
@@ -1657,7 +1683,7 @@ UPDATE_CONTAINER () {
       TRIM_FILESYSTEM
       UPDATE_CHECK
   elif [[ "$OS" =~ fedora ]]; then
-    echo -e "\n${OR:-}--- DNF UPGRATE ---${CL:-}"
+    echo -e "\n${OR:-}--- DNF UPGRADE ---${CL:-}"
     RUN_STEP "$CONTAINER" pct exec "$CONTAINER" -- bash -c "dnf -y upgrade"
     if [[ $ERROR_CODE != "" ]]; then return; fi
     echo -e "\n${OR:-}--- DNF CLEANING ---${CL:-}"
@@ -1718,6 +1744,7 @@ UPDATE_CONTAINER () {
 # VM Update Start
 VM_UPDATE_START () {
   local qm_list
+  local -a shutdown_pids=()
   if ! qm_list=$(qm list); then
     echo -e "❌${RD:-} Could not list the VMs of this node${CL:-}\n"
     UPDATE_FAILURE=true
@@ -1761,6 +1788,7 @@ VM_UPDATE_START () {
           else
             echo -e "⏹ ${GN:-} Shutting down VM${BL:-} $VM ${CL:-}\n\n"
             RUN_PROXMOX_COMMAND qm shutdown "$VM" &
+            shutdown_pids+=("$!")
           fi
           WILL_STOP="false"
           START_WAITING="false"
@@ -1783,6 +1811,9 @@ VM_UPDATE_START () {
       fi
     fi
   done
+  if ((${#shutdown_pids[@]})); then
+    wait "${shutdown_pids[@]}" || true
+  fi
 }
 
 # VM Update
@@ -2242,7 +2273,8 @@ UPDATE_MAIL_BODY() {
   elif [[ "${CCONTAINER:-}" == true || "${CONTAINER:-}" =~ ^[0-9]+$ || "${ID:-}" =~ ^[0-9]+$ ]]; then
     target_type="lxc"
   fi
-  package_count=$(grep -Eo '[0-9]+ (upgraded|updated|processed)' "$LOG_FILE" 2>/dev/null | tail -n 1 || true)
+  # APT 3 (Proxmox VE 9) prints "Upgrading: N, ..." instead of "N upgraded".
+  package_count=$(grep -Eo '[0-9]+ (upgraded|updated|processed)|Upgrading: [0-9]+' "$LOG_FILE" 2>/dev/null | tail -n 1 || true)
   printf 'Ultimate Updater update summary\n\n'
   printf '🖥️ %s\n\n' "$HOSTNAME"
   if [[ "$target_type" != host && ! ( "$target" == "$HOSTNAME" && "$display_name" == "$HOSTNAME" ) ]]; then

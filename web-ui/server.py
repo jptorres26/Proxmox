@@ -1073,6 +1073,7 @@ body:has(#login-screen.open) .nav-scrim { display:none !important; }
       'Notifications':['Email recipient defaults to root and the sender defaults to the system user. Daily checks are enabled by default; no-updates mail and security-only filtering are disabled by default.','These switches control existing notification selection only; they do not store SMTP credentials.']
     };
     const fieldHelpContent={
+      REBOOT_IF_NEEDED:['Reserved: update runs report when a system needs a reboot, but never reboot hosts or guests automatically, whatever this setting says.'],
       SNAPSHOT:['Optional protection before a guest update. If snapshots are not supported for the guest or storage, the update continues without one; an unexpected snapshot error keeps the existing safety handling. An unsupported snapshot does not automatically enable a backup.'],
       BACKUP:['Optional protection that is independent of snapshots and runs only when enabled. A backup may take significantly longer depending on guest size and storage. Snapshot and backup can be enabled together, separately, or both disabled.'],
       BACKUP_MODE:['Controls the vzdump backup mode: stop, suspend, or snapshot. This is the backup mode and is separate from the Ultimate Updater Snapshot option.']
