@@ -1,6 +1,41 @@
 Changelog:
 ==========
 
+**Unreleased** (modernization and audit fixes)
+New:
+- `UU_REPOSITORY` selects the download source, so forks install and self-update from their own repository
+- one test runner (`tests/run-all.sh`), a lint script (ShellCheck, Ruff, actionlint) and a headless-browser smoke test, all run in CI with current pinned tooling
+- the Web UI sends a hash-based Content Security Policy and the usual security headers
+- `UU_QGA_UPDATE_TIMEOUT` (default 3600 s) bounds guest-agent package steps, user scripts and Windows updates
+- `UU_ALLOW_MAJOR_UPGRADE=true` lets an unattended host update start a Proxmox VE major upgrade; by default it stops and reports it
+
+Improved:
+- checks simulate the same commands the update runs (`dist-upgrade` on the host and LXC, `--with-new-pkgs upgrade` on VMs), so held-back packages are counted
+- Proxmox VE 9 / Debian 13: APT 3 output, kernel pins in the reboot check, and `LogFilterPatterns=` only where systemd supports it
+- mail is sent through sendmail with explicit headers, so GNU mailutils and s-nail work; several recipients and "Name <address>" senders are accepted
+- the Web UI settings writer keeps the file format the scripts read, the settings form shows what changed, schedules show their own last run, TLS certificates are reloaded after renewal, and timed-out commands stop their whole process group
+- `job-runner.sh list` reads each state file once (about 3x faster with 50 jobs)
+- user scripts, extras and QGA commands run from a private mktemp directory in the guest, which is removed afterwards
+- self-updates keep edited `exit/*.sh` hooks and put the new default next to them as `*.dist`
+
+Fixed:
+- CLEAN_LOGFILE truncated the update log; failed steps ran twice; per-target state leaked into the next target
+- snapshot rotation deleted snapshots it had not created; the Docker cleanup extra removed containers and volumes
+- RPM and Arch update counts, Arch guest upgrades, FreeBSD detection over SSH, hibernated VMs (no longer resumed by a check), and unsupported guest systems are reported as such
+- a failed `apt-get -s` read as "0 updates"; `EMAIL_ONLY_SECURITY` never matched; `EXIT_ON_ERROR` did not stop the run
+- VMs were shut down while a guest-agent package job or Windows installation was still running; background guest shutdowns were not waited for
+- Windows updates with license terms failed to install
+- Internal SSH overrides were ignored for VM updates; SSH port overrides leaked to the next node
+- installer: failures exited 0, uninstall removed unrelated crontab lines, archive entries were not checked, a literal glob could be installed as a file
+- Web UI: concurrent schedule edits left orphaned timers, config saves could corrupt neighbouring keys, the login rate limit was bypassable, unassigned guests offered node actions that always failed
+- tag filters glob-expanded tokens and could loop on huge ranges; job-state races and stale remote job references
+
+Security/Safety:
+- guest command output is no longer evaluated as host arithmetic; the internet check and pacman environment are passed as data
+- remote scripts are staged and checked instead of streamed to `bash -s`; remote /tmp work directories are created exclusively
+- the Web UI bounds unauthenticated connections and sessions, never falls back to plain HTTP on a Proxmox node, and error responses no longer echo file paths
+- External bootstrap validates the target user, settings reject quotes and backslashes, and installer downloads are HTTPS-only
+
 **v5.1 Beta 3** (public beta / release candidate for final validation)
 New:
 - central Web UI with PAM login, responsive configuration, filter previews, External management, Jobs, Logs, and running-job visibility
