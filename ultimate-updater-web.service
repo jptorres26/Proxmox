@@ -17,15 +17,16 @@ Restart=on-failure
 RestartSec=5s
 Environment=PYTHONUNBUFFERED=1
 UMask=0077
-# Hardening that leaves the updater's file and process access unchanged
-# (jobs run in their own transient units).
+# Hardening that leaves file, device, and namespace access unchanged: the
+# UI's own process tree may run pct exec, qm start, ssh, and pvesh. Options
+# such as ProtectClock= (device allow-list: no /dev/ptmx, /dev/kvm),
+# ProtectControlGroups=, RestrictNamespaces=, or MemoryDenyWriteExecute=
+# (ctypes PAM callbacks) would break it.
 NoNewPrivileges=yes
 LockPersonality=yes
-ProtectClock=yes
-ProtectKernelLogs=yes
-ProtectKernelModules=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target
