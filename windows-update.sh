@@ -44,18 +44,35 @@ try {
     Write-Output 'UU_WINDOWS|ok|0|false|no updates'
     exit 0
   }
+  # As in Microsoft's unattended Windows Update Agent sample: accept the
+  # license terms (an update with unaccepted terms fails to install) and
+  # skip updates that can ask for input, which would block the unattended
+  # installation.
+  $installable = New-Object -ComObject Microsoft.Update.UpdateColl
+  $interactive = 0
+  foreach ($update in $available) {
+    if ($update.InstallationBehavior.CanRequestUserInput) { $interactive++; continue }
+    if (-not $update.EulaAccepted) { $update.AcceptEula() }
+    [void]$installable.Add($update)
+  }
+  $skipped = ''
+  if ($interactive -gt 0) { $skipped = ('; {0} interactive update(s) skipped' -f $interactive) }
+  if ($installable.Count -eq 0) {
+    Write-Output ("UU_WINDOWS|ok|0|{0}|nothing installed{1}" -f (Test-UURebootRequired).ToString().ToLower(), $skipped)
+    exit 0
+  }
   $downloader = $session.CreateUpdateDownloader()
-  $downloader.Updates = $available
+  $downloader.Updates = $installable
   $download = $downloader.Download()
   if ($download.ResultCode -notin 2, 3) {
     Write-Output ("UU_WINDOWS|error|0|false|download failed (result {0})" -f $download.ResultCode)
     exit 21
   }
   $installer = $session.CreateUpdateInstaller()
-  $installer.Updates = $available
+  $installer.Updates = $installable
   $installation = $installer.Install()
   $failed = 0
-  for ($index = 0; $index -lt $available.Count; $index++) {
+  for ($index = 0; $index -lt $installable.Count; $index++) {
     if ($installation.GetUpdateResult($index).ResultCode -in 3, 4, 5) { $failed++ }
   }
   $reboot = [bool]$installation.RebootRequired -or (Test-UURebootRequired)
@@ -63,7 +80,7 @@ try {
     Write-Output ("UU_WINDOWS|error|{0}|{1}|{2} update(s) failed" -f $failed, $reboot.ToString().ToLower(), $failed)
     exit 22
   }
-  Write-Output ("UU_WINDOWS|ok|{0}|{1}|installed" -f $available.Count, $reboot.ToString().ToLower())
+  Write-Output ("UU_WINDOWS|ok|{0}|{1}|installed{2}" -f $installable.Count, $reboot.ToString().ToLower(), $skipped)
   exit 0
 } catch {
   $message = $_.Exception.Message -replace '[\r\n|]', ' '
