@@ -174,7 +174,7 @@ ${QEMU_EXEC_STDERR}"
 
     if [[ "$deadline" -gt 0 && "$SECONDS" -ge "$deadline" ]]; then
       QEMU_EXEC_ERROR_CLASS=QGA_TIMEOUT
-      QEMU_EXEC_OUTPUT="QEMU guest-exec timed out after ${timeout}s"
+      QEMU_EXEC_OUTPUT="QEMU guest-exec timed out after ${timeout}s; the guest command was not terminated"
       QEMU_EXEC_TRANSPORT_RC=1
       return 0
     fi
@@ -257,7 +257,11 @@ QEMU_GUEST_EXEC_DURABLE () {
     return 0
   fi
 
-  deadline=$((SECONDS + timeout))
+  if [[ "$timeout" -gt 0 ]]; then
+    deadline=$((SECONDS + timeout))
+  else
+    deadline=0
+  fi
   while :; do
     QEMU_GUEST_EXEC "$vmid" --timeout 15 -- bash -c \
       "if [ -r '$rc' ]; then cat '$output' 2>/dev/null; printf '\\n__UU_GUEST_EXIT__'; cat '$rc'; else exit 75; fi"
@@ -300,7 +304,7 @@ QEMU_GUEST_EXEC_DURABLE () {
     QEMU_EXEC_ERROR_CLASS=QGA_GUEST_EXEC_STATUS
     QEMU_EXEC_OUTPUT="Invalid durable guest-job status"
     QEMU_EXEC_TRANSPORT_RC=1
-    break
+    return 0
   done
   QEMU_EXEC_ERROR_CLASS=QGA_TIMEOUT
   QEMU_EXEC_OUTPUT="Durable guest update job did not finish within ${timeout}s; it was not terminated"

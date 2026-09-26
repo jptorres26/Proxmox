@@ -80,6 +80,12 @@ fi
 BRANCH=master
 DPKG_OPTIONS=(-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
 DPKG_OPTIONS_STRING="${DPKG_OPTIONS[*]}"
+# Upper bound (seconds) for one package-manager step run through the QEMU
+# Guest Agent. qm's default of 30 seconds (120 for the old APT upgrade) ended
+# the wait while dpkg/dnf was still working, and a VM that had been started
+# only for the update was then shut down in the middle of the transaction.
+QGA_UPDATE_TIMEOUT="${UU_QGA_UPDATE_TIMEOUT:-3600}"
+[[ "$QGA_UPDATE_TIMEOUT" =~ ^[1-9][0-9]{0,5}$ ]] || QGA_UPDATE_TIMEOUT=3600
 
 # Tag filter
 # shellcheck disable=SC1091
@@ -1261,10 +1267,21 @@ else
   }
 fi
 
+# A guest process keeps running when the wait for it ends (timeout) or its
+# status can no longer be read. Remember that, so a VM that was started for
+# the update is not shut down in the middle of a package transaction.
+QGA_NOTE_UNFINISHED_JOB () {
+  case "$QEMU_EXEC_ERROR_CLASS" in
+    QGA_TIMEOUT|QGA_GUEST_EXEC_STATUS) QGA_JOB_MAY_BE_RUNNING=true ;;
+  esac
+  return 0
+}
+
 # Run a QEMU command once, display its output, and return the guest exit code.
 # A non-zero transport status is returned unchanged.
 RUN_QEMU_COMMAND () {
   QEMU_GUEST_EXEC "$@"
+  QGA_NOTE_UNFINISHED_JOB
   if [[ $QEMU_EXEC_TRANSPORT_RC -ne 0 ]]; then
     [[ -n "$QEMU_EXEC_OUTPUT" ]] && printf '%s\n' "$QEMU_EXEC_OUTPUT"
     return "$QEMU_EXEC_TRANSPORT_RC"
@@ -1279,6 +1296,7 @@ RUN_QEMU_COMMAND () {
 
 RUN_QEMU_DURABLE () {
   QEMU_GUEST_EXEC_DURABLE "$@"
+  QGA_NOTE_UNFINISHED_JOB
   if [[ $QEMU_EXEC_TRANSPORT_RC -ne 0 ]]; then
     [[ -n "$QEMU_EXEC_OUTPUT" ]] && printf '%s\n' "$QEMU_EXEC_OUTPUT"
     return "$QEMU_EXEC_TRANSPORT_RC"
@@ -1420,6 +1438,7 @@ UPDATE_HOST_ITSELF () {
 RESET_TARGET_STATE () {
   ERROR_CODE="" ERROR_MSG="" ID="" UPDATE_USER=""
   CCONTAINER="" CVM="" SSH_CONNECTION="" UNIFI=""
+  QGA_JOB_MAY_BE_RUNNING=false
 }
 
 CONTAINER_UPDATE_START () {
@@ -1662,9 +1681,14 @@ VM_UPDATE_START () {
           START_WAITING="true"
           UPDATE_VM "$VM"
           CAPTURE_POST_UPDATE_STATUS "$VM" cvm
-          # Stop the VM
-          echo -e "⏹ ${GN:-} Shutting down VM${BL:-} $VM ${CL:-}\n\n"
-          RUN_PROXMOX_COMMAND qm shutdown "$VM" &
+          # Stop the VM, unless a guest-agent job outlived its wait: shutting
+          # down now could interrupt a package transaction.
+          if [[ "$QGA_JOB_MAY_BE_RUNNING" == true ]]; then
+            echo -e "⚠ ${OR:-} VM $VM may still run a package job; it is left running${CL:-}\n\n"
+          else
+            echo -e "⏹ ${GN:-} Shutting down VM${BL:-} $VM ${CL:-}\n\n"
+            RUN_PROXMOX_COMMAND qm shutdown "$VM" &
+          fi
           WILL_STOP="false"
           START_WAITING="false"
         else
@@ -1864,13 +1888,13 @@ UPDATE_VM_QEMU () {
     # Run Update
     if [[ $KERNEL =~ FreeBSD && $FREEBSD_UPDATES == true ]]; then
       echo -e "${OR:-}--- PKG UPDATE ---${CL:-}"
-      RUN_QEMU_COMMAND "$VM" -- tcsh -c "pkg update" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
+      RUN_QEMU_COMMAND "$VM" --timeout "$QGA_UPDATE_TIMEOUT" -- tcsh -c "pkg update" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
       if [[ $ERROR_CODE != "" ]]; then return; fi
       echo -e "\n${OR:-}--- PKG UPGRADE ---${CL:-}"
-      RUN_QEMU_COMMAND "$VM" -- tcsh -c "pkg upgrade -y" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
+      RUN_QEMU_COMMAND "$VM" --timeout "$QGA_UPDATE_TIMEOUT" -- tcsh -c "pkg upgrade -y" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
       if [[ $ERROR_CODE != "" ]]; then return; fi
       echo -e "\n${OR:-}--- PKG CLEANING ---${CL:-}"
-      RUN_QEMU_COMMAND "$VM" -- tcsh -c "pkg autoremove -y" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
+      RUN_QEMU_COMMAND "$VM" --timeout "$QGA_UPDATE_TIMEOUT" -- tcsh -c "pkg autoremove -y" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
       if [[ $ERROR_CODE != "" ]]; then return; fi
       echo
       UPDATE_CHECK
@@ -1881,49 +1905,51 @@ UPDATE_VM_QEMU () {
     elif [[ ${OS,,} =~ ubuntu|mint|kali|debian|devuan ]]; then
       # Check Internet connection
       if ! (RUN_QEMU_COMMAND "$VM" -- bash -c "$CHECK_URL_EXE -q -c1 $CHECK_URL &>/dev/null"); then
-        echo -e "${OR:-} ❌ Internet is not reachable - skip the update${CL:-}\n"
+        # Same as the LXC and SSH paths: a skipped update is not a success.
+        echo -e "${OR:-} ❌ Internet check fail - skip this VM${CL:-}\n"
+        UPDATE_FAILURE=true
         return
       fi
       echo -e "${OR:-}--- APT UPDATE ---${CL:-}"
-      RUN_QEMU_COMMAND "$VM" --timeout 120 -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get update -y" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
+      RUN_QEMU_COMMAND "$VM" --timeout "$QGA_UPDATE_TIMEOUT" -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get update -y" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
       if [[ $ERROR_CODE != "" ]]; then return; fi
       echo -e "\n${OR:-}--- APT UPGRADE ---${CL:-}"
       if [[ "$INCLUDE_PHASED_UPDATES" != "true" ]]; then
-        RUN_QEMU_DURABLE "$VM" --timeout 120 -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get $DPKG_OPTIONS_STRING upgrade -y" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
+        RUN_QEMU_DURABLE "$VM" --timeout "$QGA_UPDATE_TIMEOUT" -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get $DPKG_OPTIONS_STRING upgrade -y" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
         if [[ $ERROR_CODE != "" ]]; then return; fi
       else
-        RUN_QEMU_DURABLE "$VM" --timeout 120 -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get $DPKG_OPTIONS_STRING -o APT::Get::Always-Include-Phased-Updates=true upgrade -y" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
+        RUN_QEMU_DURABLE "$VM" --timeout "$QGA_UPDATE_TIMEOUT" -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get $DPKG_OPTIONS_STRING -o APT::Get::Always-Include-Phased-Updates=true upgrade -y" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
         if [[ $ERROR_CODE != "" ]]; then return; fi
       fi
       echo -e "\n${OR:-}--- APT CLEANING ---${CL:-}"
-      RUN_QEMU_COMMAND "$VM" -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get --purge autoremove -y" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
+      RUN_QEMU_COMMAND "$VM" --timeout "$QGA_UPDATE_TIMEOUT" -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get --purge autoremove -y" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
       if [[ $ERROR_CODE != "" ]]; then return; fi
-      RUN_QEMU_COMMAND "$VM" -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get autoclean -y" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
+      RUN_QEMU_COMMAND "$VM" --timeout "$QGA_UPDATE_TIMEOUT" -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get autoclean -y" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
       if [[ $ERROR_CODE != "" ]]; then return; fi
       echo
       UPDATE_CHECK
     elif [[ "$OS" =~ Fedora ]]; then
       echo -e "\n${OR:-}--- DNF UPGRADE ---${CL:-}"
-      RUN_QEMU_COMMAND "$VM" -- bash -c "dnf -y upgrade" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
+      RUN_QEMU_DURABLE "$VM" --timeout "$QGA_UPDATE_TIMEOUT" -- bash -c "dnf -y upgrade" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
       if [[ $ERROR_CODE != "" ]]; then return; fi
       echo -e "\n${OR:-}--- DNF CLEANING ---${CL:-}"
-      RUN_QEMU_COMMAND "$VM" -- bash -c "dnf -y --purge autoremove" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
+      RUN_QEMU_DURABLE "$VM" --timeout "$QGA_UPDATE_TIMEOUT" -- bash -c "dnf -y --purge autoremove" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
       if [[ $ERROR_CODE != "" ]]; then return; fi
       echo
       UPDATE_CHECK
     elif [[ "$OS" =~ Arch ]]; then
       echo -e "${OR:-}--- PACMAN UPDATE ---${CL:-}"
-      RUN_QEMU_COMMAND "$VM" -- bash -c "pacman -Syu --noconfirm" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
+      RUN_QEMU_DURABLE "$VM" --timeout "$QGA_UPDATE_TIMEOUT" -- bash -c "pacman -Syu --noconfirm" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
       if [[ $ERROR_CODE != "" ]]; then return; fi
       echo
       UPDATE_CHECK
     elif [[ "$OS" =~ Alpine ]]; then
       echo -e "${OR:-}--- APK UPDATE ---${CL:-}"
-      RUN_QEMU_COMMAND "$VM" -- ash -c "apk -U upgrade" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
+      RUN_QEMU_COMMAND "$VM" --timeout "$QGA_UPDATE_TIMEOUT" -- ash -c "apk -U upgrade" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
       if [[ $ERROR_CODE != "" ]]; then return; fi
     elif [[ "$OS" =~ CentOS ]]; then
       echo -e "${OR:-}--- YUM UPDATE ---${CL:-}"
-      RUN_QEMU_COMMAND "$VM" -- bash -c "yum -y update" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
+      RUN_QEMU_DURABLE "$VM" --timeout "$QGA_UPDATE_TIMEOUT" -- bash -c "yum -y update" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
       if [[ $ERROR_CODE != "" ]]; then return; fi
       echo
       UPDATE_CHECK

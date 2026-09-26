@@ -12,6 +12,15 @@ qm agent <VMID> ping
 qm guest exec <VMID> -- true
 ```
 
+Each package step run through QGA may take up to one hour. Set
+`UU_QGA_UPDATE_TIMEOUT` (seconds) in the environment to change that, for
+example `UU_QGA_UPDATE_TIMEOUT=7200 update`. APT, DNF, YUM, and pacman
+upgrades run as a transient systemd job inside the guest, so a restart of
+`qemu-guest-agent` during the upgrade does not interrupt them. When the wait
+ends before a step finishes, the guest job is not terminated: the VM is
+reported as failed, and a VM that was started only for the update is left
+running instead of being shut down.
+
 If an active Internal SSH override exists, SSH is preferred. Disabling that
 override leaves its saved values in place but removes it from runtime
 resolution, allowing the default/QGA path to take over. Removing the
