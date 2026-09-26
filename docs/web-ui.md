@@ -48,6 +48,15 @@ contains the three available areas: Dashboard, Settings, and Scheduler.
 Settings are grouped into connection management, target selection, update
 behavior, backup and safety, extra updates, and notifications.
 
+Saving writes only the settings you changed, as `KEY="value"` lines that the
+scripts read back unchanged; comments and unrelated lines are kept. Values
+are checked per setting: quotes, backslashes, control characters, shell
+metacharacters where a value reaches a command line, and a leading `-` are
+rejected with a message that names the setting. The editor shows what the
+scripts actually use, so an indented or unquoted assignment that the
+scripts ignore appears empty until it is saved from the UI. **Cancel**
+discards unsaved changes.
+
 ![Web UI settings](images/web-ui/settings.png)
 
 ### Jobs and logs
@@ -62,7 +71,10 @@ to the retained log.
 
 The Scheduler uses the existing job runner and safety rules. It supports
 enabled schedules, selected weekdays, next and last run information, and the
-actions Edit, Run now, Disable, and Delete.
+actions Edit, Run now, Disable, and Delete. The last run shown for a schedule
+is the latest job started by that schedule (by its timer or **Run now**);
+schedule units created by older releases are updated when the Web UI
+service starts.
 
 ![Web UI scheduler](images/web-ui/scheduler.png)
 
