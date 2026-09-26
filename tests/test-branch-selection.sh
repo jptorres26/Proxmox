@@ -40,6 +40,7 @@ source "$ROOT_DIR/config-merge.sh"
 MERGE_UPDATE_CONFIG "$work_dir/update.conf" "$work_dir/update.conf.dist" beta
 grep -Fqx 'USED_BRANCH="beta"    # could be "master/beta/develop"' "$work_dir/update.conf"
 
-grep -Fq 'https://raw.githubusercontent.com/BassT23/Proxmox/' "$ROOT_DIR/update.sh"
+# shellcheck disable=SC2016 # literal URL template in update.sh.
+grep -Fq 'https://raw.githubusercontent.com/$UU_REPOSITORY/' "$ROOT_DIR/update.sh"
 
 echo 'branch selection tests: PASS'

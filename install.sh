@@ -26,8 +26,23 @@ WEB_SERVICE_PATH="/etc/systemd/system/$WEB_SERVICE_NAME"
 INITIAL_INVENTORY_STATE_FILE="/var/lib/ultimate-updater/initial-inventory.state"
 INITIAL_INVENTORY_LOCK_FILE="/var/lib/ultimate-updater/initial-inventory.lock"
 TEMP_FOLDER="/root/Ultimate-Updater-Temp"
-SERVER_URL="https://raw.githubusercontent.com/BassT23/Proxmox/$BRANCH"
 BUILD_METADATA_FILE="$LOCAL_FILES/build-metadata"
+# Source repository (owner/name). Forks install with UU_REPOSITORY=owner/name;
+# the choice is recorded in build-metadata, so later updates keep using it
+# unless UU_REPOSITORY is set again.
+UPSTREAM_REPOSITORY="BassT23/Proxmox"
+REPOSITORY=${UU_REPOSITORY:-}
+if [[ -z "$REPOSITORY" && -r "$BUILD_METADATA_FILE" ]]; then
+  REPOSITORY=$(awk -F'"' '/^repository=/ {print $2; exit}' "$BUILD_METADATA_FILE")
+fi
+REPOSITORY=${REPOSITORY:-$UPSTREAM_REPOSITORY}
+if [[ ! "$REPOSITORY" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$ ||
+      "$REPOSITORY" == */. || "$REPOSITORY" == */.. ]]; then
+  echo "Unsupported source repository: $REPOSITORY (expected GitHub owner/name)" >&2
+  exit 2
+fi
+export UU_REPOSITORY="$REPOSITORY"
+SERVER_URL="https://raw.githubusercontent.com/$REPOSITORY/$BRANCH"
 ARCHIVE_COMMIT=""
 ARCHIVE_TAG=""
 
@@ -85,27 +100,34 @@ DOWNLOAD_ARCHIVE() {
   ARCHIVE_TAG=""
   if [[ "$BRANCH" == master ]]; then
     release_json="$TEMP_FOLDER/release.json"
-    DOWNLOAD_FILE "https://api.github.com/repos/BassT23/Proxmox/releases/latest" "$release_json" text || return 1
-    asset_url=$(grep -m1 'browser_download_url' "$release_json" | cut -d: -f2- | tr -d '" ,')
-    [[ "$asset_url" =~ ^https:// ]] || { echo "GitHub release archive URL is unavailable." >&2; return 1; }
-    release_tag=$(grep -m1 '"tag_name"' "$release_json" | cut -d: -f2- | tr -d '" ,')
-    [[ "$release_tag" =~ ^[A-Za-z0-9._/-]+$ ]] && ARCHIVE_TAG="$release_tag"
-    DOWNLOAD_FILE "$asset_url" "$archive" archive || return 1
+    if DOWNLOAD_FILE "https://api.github.com/repos/$REPOSITORY/releases/latest" "$release_json" text; then
+      asset_url=$(grep -m1 'browser_download_url' "$release_json" | cut -d: -f2- | tr -d '" ,')
+      [[ "$asset_url" =~ ^https:// ]] || { echo "GitHub release archive URL is unavailable." >&2; return 1; }
+      release_tag=$(grep -m1 '"tag_name"' "$release_json" | cut -d: -f2- | tr -d '" ,')
+      [[ "$release_tag" =~ ^[A-Za-z0-9._/-]+$ ]] && ARCHIVE_TAG="$release_tag"
+      DOWNLOAD_FILE "$asset_url" "$archive" archive || return 1
+    elif [[ "$REPOSITORY" != "$UPSTREAM_REPOSITORY" ]]; then
+      # Forks do not inherit GitHub releases; install their master branch.
+      echo "No release is published in $REPOSITORY; using its master branch instead." >&2
+      DOWNLOAD_FILE "https://github.com/$REPOSITORY/tarball/master" "$archive" archive || return 1
+    else
+      return 1
+    fi
   else
-    DOWNLOAD_FILE "https://github.com/BassT23/Proxmox/tarball/$BRANCH" "$archive" archive || return 1
+    DOWNLOAD_FILE "https://github.com/$REPOSITORY/tarball/$BRANCH" "$archive" archive || return 1
   fi
   archive_root=$(tar -tzf "$archive" 2>/dev/null | awk -F/ 'NF {print $1; exit}')
   if [[ "$archive_root" =~ ([0-9a-f]{7,40})$ ]]; then
     ARCHIVE_COMMIT="${BASH_REMATCH[1]}"
     if [[ ${#ARCHIVE_COMMIT} -ne 40 ]]; then
       ARCHIVE_COMMIT=$(curl -4 -sS --connect-timeout 5 --max-time 15 \
-        "https://api.github.com/repos/BassT23/Proxmox/commits/$ARCHIVE_COMMIT" 2>/dev/null |
+        "https://api.github.com/repos/$REPOSITORY/commits/$ARCHIVE_COMMIT" 2>/dev/null |
         awk -F'"' '/"sha"[[:space:]]*:/ {print $4; exit}' || true)
     fi
     [[ "$ARCHIVE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || ARCHIVE_COMMIT=""
   elif [[ -n "$ARCHIVE_TAG" ]]; then
     ARCHIVE_COMMIT=$(curl -4 -sS --connect-timeout 5 --max-time 15 \
-      "https://api.github.com/repos/BassT23/Proxmox/commits/$ARCHIVE_TAG" 2>/dev/null |
+      "https://api.github.com/repos/$REPOSITORY/commits/$ARCHIVE_TAG" 2>/dev/null |
       awk -F'"' '/"sha"[[:space:]]*:/ {print $4; exit}' || true)
     [[ "$ARCHIVE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || ARCHIVE_COMMIT=""
   fi
@@ -131,14 +153,14 @@ WRITE_BUILD_METADATA() {
   [[ "$branch" =~ ^(master|beta|develop)$ ]] || branch="unknown"
   if [[ "$branch" != unknown && ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
     commit=$(curl -4 -sS --connect-timeout 5 --max-time 15 \
-      "https://api.github.com/repos/BassT23/Proxmox/commits/$branch" 2>/dev/null |
+      "https://api.github.com/repos/$REPOSITORY/commits/$branch" 2>/dev/null |
       awk -F'"' '/"sha"[[:space:]]*:/ {print $4; exit}' || true)
   fi
   [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || commit="unknown"
   [[ "$tag" =~ ^[A-Za-z0-9._/-]+$ ]] || tag=""
   temporary=$(mktemp "${BUILD_METADATA_FILE}.XXXXXX") || return 1
-  printf 'schema_version=1\nbranch="%s"\ncommit="%s"\ntag="%s"\n' \
-    "$branch" "$commit" "$tag" > "$temporary"
+  printf 'schema_version=1\nbranch="%s"\ncommit="%s"\ntag="%s"\nrepository="%s"\n' \
+    "$branch" "$commit" "$tag" "$REPOSITORY" > "$temporary"
   install -m 0644 "$temporary" "$BUILD_METADATA_FILE"
   rm -f -- "$temporary"
 }
@@ -388,7 +410,7 @@ ${OR:-}Is it OK for you, or want to backup your files first?${CL:-}\n"
   if [[ -f /usr/local/bin/update ]] && [[ ! -f /usr/local/sbin/update ]]; then
     mkdir -p "$TEMP_FOLDER" || exit 1
     legacy_update=$(mktemp "$TEMP_FOLDER/update.sh.XXXXXX") || exit 1
-    DOWNLOAD_FILE "https://raw.githubusercontent.com/BassT23/Proxmox/$BRANCH/update.sh" "$legacy_update" shell || exit 1
+    DOWNLOAD_FILE "https://raw.githubusercontent.com/$REPOSITORY/$BRANCH/update.sh" "$legacy_update" shell || exit 1
     mv -f -- "$legacy_update" "$LOCAL_FILES/update.sh"
     chmod 750 "$LOCAL_FILES/update.sh"
     ln -sf "$LOCAL_FILES/update.sh" /usr/local/sbin/update

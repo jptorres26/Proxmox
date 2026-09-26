@@ -78,13 +78,22 @@ fi
 # USED_BRANCH describes the installed source only. A bare -up is always the
 # stable master target; beta/develop require an explicit selector.
 BRANCH=master
-SERVER_URL="https://raw.githubusercontent.com/BassT23/Proxmox/$INSTALLED_BRANCH"
 DPKG_OPTIONS=(-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
 DPKG_OPTIONS_STRING="${DPKG_OPTIONS[*]}"
 
 # Tag filter
 # shellcheck disable=SC1091
 . "$LOCAL_FILES/tag-filter.sh"
+
+# Source repository for self-updates (see UU_SOURCE_REPOSITORY in
+# tag-filter.sh). Exported so a downloaded installer keeps using it.
+if declare -F UU_SOURCE_REPOSITORY >/dev/null; then
+  UU_REPOSITORY=$(UU_SOURCE_REPOSITORY)
+else
+  UU_REPOSITORY="BassT23/Proxmox"
+fi
+export UU_REPOSITORY
+SERVER_URL="https://raw.githubusercontent.com/$UU_REPOSITORY/$INSTALLED_BRANCH"
 
 # Colors
 BL="\e[36m"
@@ -398,7 +407,7 @@ RUN_BRANCH_UPDATE () {
   local target_branch=$1 installer cache_buster
   cache_buster=$(date +%s)
 
-  if ! installer=$(DOWNLOAD_SHELL_FILE "https://raw.githubusercontent.com/BassT23/Proxmox/refs/heads/$target_branch/install.sh?uu_cache=$cache_buster"); then
+  if ! installer=$(DOWNLOAD_SHELL_FILE "https://raw.githubusercontent.com/$UU_REPOSITORY/refs/heads/$target_branch/install.sh?uu_cache=$cache_buster"); then
     echo -e "${RD:-}Unable to download the $target_branch installer.${CL:-}"
     return 1
   fi
@@ -510,11 +519,11 @@ UPDATE () {
     fi
   fi
   if [[ "${UU_NONINTERACTIVE:-false}" == true || ! -t 0 ]]; then
-    RUN_DOWNLOADED_INSTALLER "https://raw.githubusercontent.com/BassT23/Proxmox/refs/heads/$BRANCH/install.sh?uu_cache=$cache_buster" \
+    RUN_DOWNLOADED_INSTALLER "https://raw.githubusercontent.com/$UU_REPOSITORY/refs/heads/$BRANCH/install.sh?uu_cache=$cache_buster" \
       UU_TARGET_BRANCH="$BRANCH" UU_NONINTERACTIVE=true update
     return $?
   fi
-  RUN_DOWNLOADED_INSTALLER "https://raw.githubusercontent.com/BassT23/Proxmox/refs/heads/$BRANCH/install.sh?uu_cache=$cache_buster" \
+  RUN_DOWNLOADED_INSTALLER "https://raw.githubusercontent.com/$UU_REPOSITORY/refs/heads/$BRANCH/install.sh?uu_cache=$cache_buster" \
     UU_TARGET_BRANCH="$BRANCH" UU_UPGRADE_INTERACTIVE=true UU_NONINTERACTIVE=true update
   return $?
 }
@@ -551,7 +560,7 @@ FETCH_REMOTE_COMMIT() {
   local branch="$1"
   [[ "$branch" =~ ^(master|beta|develop)$ ]] || return 1
   curl -4 -sS --connect-timeout 5 --max-time 15 \
-    "https://api.github.com/repos/BassT23/Proxmox/commits/$branch" 2>/dev/null |
+    "https://api.github.com/repos/$UU_REPOSITORY/commits/$branch" 2>/dev/null |
     awk -F'"' '/"sha"[[:space:]]*:/ {print $4; exit}'
 }
 
