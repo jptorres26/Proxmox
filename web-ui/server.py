@@ -19,7 +19,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -125,11 +125,11 @@ SCHEDULER_ID_RE = re.compile(r"^[a-f0-9]{12}$")
 SCHEDULER_NAME_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,80}$")
 SCHEDULER_TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 SCHEDULER_DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
-SCHEDULER_DAY_LABELS = dict(zip(SCHEDULER_DAYS, ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")))
+SCHEDULER_DAY_LABELS = dict(zip(SCHEDULER_DAYS, ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"), strict=True))
 SCHEDULER_TYPES = {"check-all", "check-selected", "update-all", "update-selected"}
 SCHEDULER_SCHEMA_VERSION = 2
 SCHEDULER_TARGET_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
-SCHEDULER_LEGACY_DAYS = dict(zip(("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"), SCHEDULER_DAYS))
+SCHEDULER_LEGACY_DAYS = dict(zip(("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"), SCHEDULER_DAYS, strict=True))
 
 
 def scheduler_unit_name(schedule_id):
@@ -324,7 +324,7 @@ def _tls_mode():
     if mode == "auto":
         return mode
     raise TLSConfigurationError(
-        "WEB_UI_HTTPS must be auto, true, or false (received: %s)" % mode
+        f"WEB_UI_HTTPS must be auto, true, or false (received: {mode})"
     )
 
 
@@ -1204,7 +1204,10 @@ def parse_updater_version_output(output):
     updater = next((item for item in components if item["name"] == "Updater"), None)
     installed = updater["local"] if updater else None
     available = updater["server"] if updater else None
-    numeric = lambda value: tuple(int(part) for part in value.split(".") if part.isdigit()) if value and re.fullmatch(r"\d+(?:\.\d+)*", value) else None
+    def numeric(value):
+        if not value or not re.fullmatch(r"\d+(?:\.\d+)*", value):
+            return None
+        return tuple(int(part) for part in value.split(".") if part.isdigit())
     local_numbers, remote_numbers = numeric(installed), numeric(available)
     version_update = bool(local_numbers is not None and remote_numbers is not None and remote_numbers > local_numbers)
     commit_update = bool(re.fullmatch(r"[0-9a-f]{40}", installed_commit) and
@@ -1351,7 +1354,7 @@ def validate_config_values(values):
             minimum = 1 if key == "SSH_PORT" else 0
             maximum = 65535 if key == "SSH_PORT" else None
             if (isinstance(value, bool) or not isinstance(value, int) or value < minimum or
-                    maximum is not None and value > maximum):
+                    (maximum is not None and value > maximum)):
                 if maximum is None:
                     raise ValueError(f"{key} must be a non-negative integer.")
                 raise ValueError(f"{key} must be an integer between {minimum} and {maximum}.")
@@ -1500,7 +1503,7 @@ def external_backup_status(state_file, target, max_age=86400):
     if isinstance(result["verified_at"], str):
         try:
             verified = datetime.fromisoformat(result["verified_at"].replace("Z", "+00:00"))
-            seconds = int((datetime.now(timezone.utc) - verified).total_seconds())
+            seconds = int((datetime.now(UTC) - verified).total_seconds())
             result["age_seconds"] = max(0, seconds)
             result["status"] = "verified" if 0 <= seconds <= max_age else "expired"
         except ValueError:
@@ -1628,10 +1631,11 @@ def canonical_inventory(payload, inventory, proxmox_resources=None, backup_state
                 "check_status": "offline" if node_status == "offline" else "unknown"}
         targets.append(merge(base, status))
 
-    active_external_ids = {item["id"] for item in inventory if item.get("transport") == "ssh"}
+    # Keep the configured inventory order; iterating a set would depend on
+    # the per-process string hash seed.
+    active_external_ids = dict.fromkeys(item["id"] for item in inventory if item.get("transport") == "ssh")
     for target_id in active_external_ids:
         status = status_by_id.get(target_id)
-        inventory_item = next(item for item in inventory if item["id"] == target_id)
         base = {"id": target_id, "type": "external", "transport": "ssh",
                 "name": target_id, "reachable": None, "check_status": "unknown",
                 "os": None, "updater": None, "updates": {"available": None},
@@ -1734,10 +1738,9 @@ def target_preview(payload, config, tag_filter, inventory, proxmox_resources=Non
                     if item.get("transport") == "ssh"}
     only_external_ids = {token.lower() for token in filter_tokens(only)} & external_ids
     excluded_external_ids = {token.lower() for token in filter_tokens(exclude)} & external_ids
-    filterable = lambda item: (
-        str(item.get("type", "")).lower() in {"lxc", "vm"}
-        and str(item.get("id", "")).isdigit()
-    ) or str(item.get("type", "")).lower() == "external"
+    def filterable(item):
+        kind = str(item.get("type", "")).lower()
+        return (kind in {"lxc", "vm"} and str(item.get("id", "")).isdigit()) or kind == "external"
     def selected(item):
         item_id = str(item.get("id", ""))
         if str(item.get("type", "")).lower() in {"lxc", "vm"}:
@@ -1890,7 +1893,8 @@ def update_inventory_text(content, target, current_id=None, delete=False):
         if match and match.group(2) == "identity_file" and not target.get("identity_file"):
             continue
         if match and match.group(2) in replacements:
-            key = match.group(2); found.add(key)
+            key = match.group(2)
+            found.add(key)
             new_lines.append(f"{match.group(1)}{key}{match.group(3)}{replacements[key]}{match.group(5) or ''}{match.group(6) or ''}")
         else:
             new_lines.append(line)
@@ -2061,7 +2065,7 @@ class StatusHandler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
-            raise ValueError("invalid content length")
+            raise ValueError("invalid content length") from None
         if length > 4096:
             raise OverflowError("request body is too large")
         if length and not self.headers.get("Content-Type", "").split(";", 1)[0].lower() == "application/json":
@@ -2195,7 +2199,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             data = {"state": "unavailable", "branch": None, "installed": None,
                     "available": None, "commit": "unknown", "available_commit": "unknown",
                     "tag": None, "update_available": False, "components": []}
-        data["checked_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        data["checked_at"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         # Do not retain transient network/rate-limit failures for the normal
         # success-cache TTL. The UI performs one deliberately delayed retry.
         self.server.version_cache = {"at": now, "data": data} if data.get("state") == "ok" else None
@@ -2265,13 +2269,15 @@ class StatusHandler(BaseHTTPRequestHandler):
                   for item in resources if isinstance(item, dict) and item.get("type") in {"qemu", "lxc"}}
         for vmid in sorted(vm_ids, key=lambda value: (not value.isdigit(), value)):
             kind = "lxc" if vm_ids[vmid].get("type") == "lxc" else "vm"
-            section = f"{kind}:{vmid}"; override = overrides.get(section, {})
+            section = f"{kind}:{vmid}"
+            override = overrides.get(section, {})
             defaults = {}
             profile = vm_profiles / vmid
             if profile.is_file():
                 for line in profile.read_text(encoding="utf-8", errors="replace").splitlines():
                     if "=" in line:
-                        key, value = line.split("=", 1); defaults[key.strip()] = value.strip().strip('"')
+                        key, value = line.split("=", 1)
+                        defaults[key.strip()] = value.strip().strip('"')
             host = override.get("host", defaults.get("IP", ""))
             user = override.get("user", defaults.get("USER", "root"))
             port = override.get("port", defaults.get("SSH_VM_PORT", "22"))
@@ -2483,7 +2489,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             self.send_json(error_payload("SSH_NOT_CONFIGURED", "No SSH configuration is available for this target."), HTTPStatus.UNPROCESSABLE_ENTITY)
             return
         try:
-            result, message = (self.run_owner_guest_connection_test(target)
+            _result, message = (self.run_owner_guest_connection_test(target)
                                 if kind in {"vm", "lxc"} and target_id.isdigit()
                                 else self.run_ssh_connection_test(target))
         except (RuntimeError, ValueError) as error:
@@ -2808,7 +2814,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             response["skipped"] = errors
         self.send_json(response, HTTPStatus.ACCEPTED)
 
-    def do_GET(self):  # noqa: N802 - stdlib handler API
+    def do_GET(self):
         path = urlsplit(self.path).path
         if path in ("/", "/overview", "/settings", "/scheduler"):
             self.send_bytes(PAGE.encode(), "text/html; charset=utf-8")
@@ -2980,7 +2986,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             return
         self.send_json(error_payload("NOT_FOUND", "Not found."), HTTPStatus.NOT_FOUND)
 
-    def do_POST(self):  # noqa: N802 - stdlib handler API
+    def do_POST(self):
         try:
             payload = self.read_body()
         except OverflowError as error:
@@ -3287,7 +3293,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             return
         self.send_json({"node": node, "job": job_unit, "state": "running", "message": "Node update job started."}, HTTPStatus.ACCEPTED)
 
-    def do_PUT(self):  # noqa: N802
+    def do_PUT(self):
         if not self.write_allowed():
             return
         try:
@@ -3312,7 +3318,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             return
         self.send_json(error_payload("METHOD_NOT_ALLOWED", "Only defined configuration actions are available."), HTTPStatus.METHOD_NOT_ALLOWED)
 
-    def do_DELETE(self):  # noqa: N802
+    def do_DELETE(self):
         if not self.write_allowed():
             return
         parts = [unquote(part) for part in urlsplit(self.path).path.split("/") if part]
@@ -3384,7 +3390,7 @@ def main():
         tls_context, tls_source, tls_cert, tls_fallback_reason = build_tls_context()
     except TLSConfigurationError as error:
         print(f"WebUI TLS configuration error: {error}", flush=True)
-        raise SystemExit(78)
+        raise SystemExit(78) from None
     server = ThreadingHTTPServer((args.bind, args.port), StatusHandler)
     server.tls_enabled = tls_context is not None
     if tls_context is not None:

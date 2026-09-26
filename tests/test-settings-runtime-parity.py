@@ -2,12 +2,13 @@
 """Static coverage checks for Web UI settings and runtime boundaries."""
 
 import re
+import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parents[1] / "web-ui"))
+import server
+
 ROOT = Path(__file__).parents[1]
-import sys
-sys.path.insert(0, str(ROOT / "web-ui"))
-import server  # noqa: E402
 
 
 runtime_sources = "\n".join(
