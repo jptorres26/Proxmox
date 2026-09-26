@@ -60,6 +60,39 @@ export UU_FILTER_ELIGIBLE_IDS="103"
 apply_only_exclude_tags ONLY EXCLUDE
 [[ "$ONLY" == "" && "$EXCLUDE" == "102" ]]
 
+# Tokens are not glob-expanded: "10?" used to select files named 101/102 in
+# the current directory.
+touch "$WORK_DIR/101" "$WORK_DIR/102"
+(
+  cd "$WORK_DIR"
+  ONLY="10?"
+  EXCLUDE=""
+  UU_FILTER_ELIGIBLE_IDS="101 102" apply_only_exclude_tags ONLY EXCLUDE
+  [[ "$ONLY" != "101 102" ]] || { echo 'filter token was glob-expanded' >&2; exit 1; }
+)
+
+# Leading zeros are decimal, not octal ("08" was an arithmetic error).
+ONLY="0101-0102 08"
+EXCLUDE=""
+export UU_FILTER_ELIGIBLE_IDS="8 101 102"
+apply_only_exclude_tags ONLY EXCLUDE
+[[ "$ONLY" == "101 102 8" ]] || { echo "leading-zero IDs: $ONLY" >&2; exit 1; }
+
+# Oversized ranges are ignored instead of looping for minutes.
+ONLY="1-999999999 101"
+EXCLUDE=""
+export UU_FILTER_ELIGIBLE_IDS="101 102"
+TAG_FILTER_LAST_LOG=""
+SECONDS=0
+apply_only_exclude_tags ONLY EXCLUDE 2> "$WORK_DIR/range.err"
+(( SECONDS < 5 ))
+[[ "$ONLY" == "101" ]] || { echo "oversized range: $ONLY" >&2; exit 1; }
+grep -Fq 'Range 1-999999999 spans more than 10000 IDs and was ignored' "$WORK_DIR/range.err"
+
+# Tags come from the current configuration, not from [snapshot] sections.
+grep -Fq "awk '/^\\[/ {exit} tolower(\$0) ~ /^tags:/ {print; exit}'" "$ROOT_DIR/tag-filter.sh"
+unset UU_FILTER_ELIGIBLE_IDS
+
 cat > "$WORK_DIR/update.conf" <<'CONFIG'
 ONLY_UPDATE_CHECK="alpha"
 EXCLUDE_UPDATE_CHECK="alpha"

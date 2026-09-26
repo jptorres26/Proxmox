@@ -82,4 +82,15 @@ done
 [[ $(grep -c 'tar --no-same-owner -zxf "$TEMP_FOLDER/ultimate-updater.tar.gz"' "$INSTALL") -eq 2 ]]
 if grep -nE '^[^#]*tar -zxf' "$INSTALL"; then echo 'extraction keeps the archive owner' >&2; exit 1; fi
 
+# --- web-auth keeps the password exactly as typed ------------------------------------
+grep -Fq "IFS= read -r -s -p 'Password: ' PASSWORD" "$ROOT_DIR/web-auth.sh"
+grep -Fq "IFS= read -r -s -p 'Repeat password: ' PASSWORD_REPEAT" "$ROOT_DIR/web-auth.sh"
+
+# --- a targets.conf that is not a regular file is an error, not an empty inventory ---
+mkdir "$WORK_DIR/targets.conf.d"
+if bash -c 'source "$1/target-inventory.sh"; TARGET_INVENTORY_LOAD "$2"' _ "$ROOT_DIR" "$WORK_DIR/targets.conf.d" 2>/dev/null; then
+  echo 'a directory was accepted as targets.conf' >&2
+  exit 1
+fi
+
 echo 'installer safety: PASS'
