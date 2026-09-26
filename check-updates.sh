@@ -556,6 +556,8 @@ CHECK_HOST () {
   local remote_node_status_ok=false
   local remote_job_timeout="${UU_CHECK_REMOTE_JOB_TIMEOUT:-300}"
   local remote_cleanup_state=pending remote_diag_level=success remote_failure_class=none
+  # A node's port override must not change SSH_PORT for the next node.
+  local SSH_PORT="$SSH_PORT"
   HOST_NODE=$(CLUSTER_HOST_NODE "$HOST")
   CENTRAL_REMOTE_PHASE "CENTRAL_REMOTE_START node=$HOST_NODE host=$HOST"
   if ! INTERNAL_SSH_RESOLVE_NODE "$HOST_NODE" "$HOST" "$SSH_PORT"; then
@@ -926,7 +928,6 @@ CONTAINER_CHECK_START () {
       fi
     fi
   done
-  rm -rf $LOCAL_FILES/temp/temp
 }
 
 # Container Check
@@ -938,10 +939,11 @@ CHECK_CONTAINER_FAILURE() {
 }
 
 CHECK_CONTAINER () {
-  if [[ "$RDU" != true ]]; then
+  # An explicit ID wins; the shared var file is a fallback for old callers.
+  if [[ -n "${1:-}" ]]; then
     CONTAINER=$1
-  else
-    CONTAINER=$(awk -F'"' '/^CONTAINER=/ {print $2}' $LOCAL_FILES/temp/var)
+  elif [[ "$RDU" == true ]]; then
+    CONTAINER=$(awk -F'"' '/^CONTAINER=/ {print $2; exit}' "$LOCAL_FILES/temp/var")
   fi
   local CONTAINER_UPDATES=0 CONTAINER_NORMAL_UPDATES=null CONTAINER_SECURITY_UPDATES=null
   local OS_VERSION="" OS_RELEASE="" OS_RELEASE_ID="" OS_RELEASE_PRETTY="" OS_DISPLAY=""
@@ -950,23 +952,22 @@ CHECK_CONTAINER () {
   if declare -f cluster_target_guest_name >/dev/null 2>&1; then
     STATUS_MODEL_GUEST_NAME=$(cluster_target_guest_name "$CONTAINER" 2>/dev/null || true)
   fi
-  if ! mkdir -p -- "$LOCAL_FILES/temp"; then
-    CHECK_CONTAINER_FAILURE "Could not initialize temporary LXC check directory for $CONTAINER"
-    return
-  fi
-  if ! pct config "$CONTAINER" > "$LOCAL_FILES/temp/temp" 2>"$LOCAL_FILES/temp/pct-config.error"; then
-    pct_config_error=$(tr '\n' ' ' < "$LOCAL_FILES/temp/pct-config.error" 2>/dev/null | sed 's/[[:space:]]\+/ /g' | cut -c1-300)
+  # Kept in a variable: a fixed temp file was shared by concurrent checks,
+  # and an update job deleted it between another check's write and read.
+  local pct_config
+  if ! pct_config=$(pct config "$CONTAINER" 2>/dev/null); then
+    pct_config_error=$(pct config "$CONTAINER" 2>&1 >/dev/null | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g' | cut -c1-300)
     CHECK_CONTAINER_FAILURE "Could not read configuration for LXC $CONTAINER${pct_config_error:+: $pct_config_error}"
     return
   fi
-  OS=$(awk '/^ostype/' $LOCAL_FILES/temp/temp | cut -d' ' -f2)
+  OS=$(awk '/^ostype:/ {print $2; exit}' <<< "$pct_config")
   OS_DISPLAY="$OS"
-  if ! NAME=$(RUN_PCT_COMMAND "$CONTAINER" hostname 2>"$LOCAL_FILES/temp/hostname.error"); then
+  if ! NAME=$(RUN_PCT_COMMAND "$CONTAINER" hostname 2>/dev/null); then
     # The guest hostname is display metadata, not a prerequisite for the
     # package check.  A broken/missing hostname command must not turn an
     # otherwise checkable container into CHECK_COMMAND_FAILED.  Prefer the
     # Proxmox config, then the inventory name, and finally the target ID.
-    NAME=$(awk -F': ' '$1 == "hostname" {print $2; exit}' "$LOCAL_FILES/temp/temp" 2>/dev/null || true)
+    NAME=$(awk -F': ' '$1 == "hostname" {print $2; exit}' <<< "$pct_config")
     NAME="${NAME:-$STATUS_MODEL_GUEST_NAME}"
     NAME="${NAME:-$CONTAINER}"
     echo -e "${YL}Could not read hostname for LXC $CONTAINER; using ${NAME} as display name and continuing${CL}"
@@ -1286,10 +1287,10 @@ CHECK_VM_LIFECYCLE () {
 CHECK_VM () {
   local IP USER SSH_VM_PORT SSH_START_DELAY_TIME ssh_profile_configured=false ssh_error
   REBOOT_REQUIRED=false
-  if [[ "$RDU" != true ]]; then
+  if [[ -n "${1:-}" ]]; then
     VM=$1
-  else
-    VM=$(awk -F'"' '/^VM=/ {print $2}' $LOCAL_FILES/temp/var)
+  elif [[ "$RDU" == true ]]; then
+    VM=$(awk -F'"' '/^VM=/ {print $2; exit}' "$LOCAL_FILES/temp/var")
   fi
   STATUS_MODEL_GUEST_NAME=""
   if declare -f cluster_target_guest_name >/dev/null 2>&1; then

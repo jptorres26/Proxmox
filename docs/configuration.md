@@ -26,6 +26,12 @@ ranges, and configured tags; check and update selections are independent.
 
 `REBOOT_IF_NEEDED` controls reboot handling for updates, not checks. Guest
 start/resume behavior is controlled separately for LXC and VM targets.
+`EXIT_ON_ERROR="false"` (the default, "Continue after errors" in the Web UI)
+moves on to the next system after an error; `true` skips the remaining
+systems after the first failure. Guests that were started for the update are
+shut down either way, and the error log always describes the latest run.
+`INCLUDE_FSTRIM` trims LVM-thin container disks after an update;
+`FSTRIM_WITH_MOUNTPOINT` also trims their mount points.
 `FREEBSD_UPDATES` enables or disables the writing FreeBSD/pfSense update path;
 it does not disable read-only checks. `IN_HEADLESS_MODE` selects unattended
 operation.
