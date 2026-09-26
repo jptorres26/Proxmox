@@ -1,5 +1,5 @@
 #!/bin/bash
-# shellcheck disable=SC2002,SC2015,SC2086,SC2317
+# shellcheck disable=SC2015,SC2086,SC2317
 
 ##########
 # Update #
@@ -1979,7 +1979,10 @@ OUTPUT_TO_FILE () {
   echo 'EXEC_HOST="'"$HOSTNAME"'"' > "$TEMP_STATE_DIR/exec_host"
   if [[ "$RICM" != true ]]; then
     touch "$LOG_FILE"
+    # Keep the terminal descriptors so CLEAN_LOGFILE can stop the tee.
+    exec {UU_ORIG_STDOUT}>&1 {UU_ORIG_STDERR}>&2
     exec &> >(tee "$LOG_FILE")
+    UU_LOG_TEE_PID=$!
   fi
   # Welcome-Screen
   if [[ -f "/etc/update-motd.d/01-welcome-screen" && -x "/etc/update-motd.d/01-welcome-screen" ]]; then
@@ -1989,15 +1992,29 @@ OUTPUT_TO_FILE () {
     fi
   fi
 }
+# Drop the first line and ANSI colors from the log once the run is over.
+# The previous `cat log | sed | tee log` truncated the file while reading it
+# (usually leaving it empty) and wrote a tmp.log into the working directory.
 # shellcheck disable=SC2329
 CLEAN_LOGFILE () {
-  if [[ "$RICM" != true ]]; then
-    tail -n +2 "$LOG_FILE" > tmp.log && mv tmp.log "$LOG_FILE"
-        cat "$LOG_FILE" | sed -r "s/\x1B\[([0-9]{1,3}(;[0-9]{1,3})*)?[mGK]//g" | tee "$LOG_FILE" >/dev/null 2>&1
-    chmod 640 "$LOG_FILE"
-    if [[ -f ./tmp.log ]]; then
-      rm -rf ./tmp.log
-    fi
+  [[ "$RICM" != true ]] || return 0
+  local cleaned
+  if [[ -n "${UU_LOG_TEE_PID:-}" ]]; then
+    # Detach from the logging tee so the file is complete before rewriting.
+    # Backgrounded children (for example guest shutdowns) may still hold the
+    # pipe, so only wait a few seconds for the tee to drain.
+    exec 1>&"$UU_ORIG_STDOUT" 2>&"$UU_ORIG_STDERR"
+    for _ in {1..50}; do
+      kill -0 "$UU_LOG_TEE_PID" 2>/dev/null || break
+      sleep 0.1
+    done
+    UU_LOG_TEE_PID=""
+  fi
+  cleaned=$(mktemp "${LOG_FILE}.XXXXXX") || return 1
+  if tail -n +2 -- "$LOG_FILE" | sed -r 's/\x1B\[([0-9]{1,3}(;[0-9]{1,3})*)?[mGK]//g' > "$cleaned"; then
+    chmod 640 -- "$cleaned" && mv -f -- "$cleaned" "$LOG_FILE"
+  else
+    rm -f -- "$cleaned"
   fi
 }
 
