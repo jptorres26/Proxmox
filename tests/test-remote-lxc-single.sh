@@ -9,6 +9,8 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 # directory. The wrapper creates its root directory, but not temp/.
 awk '/^CHECK_CONTAINER_FAILURE\(\)/{copy=1} /^## VM ##/{if(copy) exit} copy' \
   "$ROOT_DIR/check-updates.sh" > "$WORK_DIR/check-container.sh"
+# Guest counts are validated by the real helper, not a stub.
+sed -n '/^GUEST_COUNT() {/,/^}/p' "$ROOT_DIR/check-updates.sh" >> "$WORK_DIR/check-container.sh"
 cat > "$WORK_DIR/harness.sh" <<'HARNESS'
 #!/bin/bash
 set -euo pipefail
@@ -28,6 +30,7 @@ RUN_PCT_COMMAND() {
   local id="$1"; shift
   [[ "$id" == 200 ]]
   [[ "${1:-}" == hostname ]] && printf 'smarthome-service\n'
+  [[ "$*" == *'wc -l'* ]] && printf '0\n'  # package count pipelines always print a number
   if [[ "${1:-}" == sh && "${2:-}" == -c && "${3:-}" == "cat /etc/os-release" ]]; then
     printf 'ID=debian\nVERSION_ID="12"\nPRETTY_NAME="Debian GNU/Linux 12 (bookworm)"\n'
   fi

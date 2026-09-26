@@ -1099,7 +1099,13 @@ DIST_UPGRADE () {
       echo -e "${OR:-}--- Cleaning ---${CL:-}"
       pct exec "$CONTAINER" -- bash -c "apt-get --purge autoremove -y && apt-get autoclean -y"
       echo -e "\n${OR:-}--- Need 5Gig on root folder for upgrade - check it now ---${CL:-}"
-      if [[ $(pct exec "$CONTAINER" -- bash -c "df --output=avail -BG / | tail -1 | sed 's/G//'") -gt 5 ]]; then
+      # Validate guest output before arithmetic: [[ -gt ]] would evaluate
+      # array subscripts such as 'x[$(cmd)]' as root on the host.
+      local available_gb
+      available_gb=$(pct exec "$CONTAINER" -- sh -c "df --output=avail -BG / | tail -n 1" 2>/dev/null || true)
+      available_gb=${available_gb//[[:space:]]/}
+      available_gb=${available_gb%G}
+      if [[ "$available_gb" =~ ^[0-9]{1,9}$ ]] && (( 10#$available_gb > 5 )); then
         echo -e "✅ OK\n"
         echo -e "${OR:-}⚠  This is the last step! !!! After all, check your repos !!!${CL:-}"
         echo -e "'sudo apt modernize-sources' could help you here."

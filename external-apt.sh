@@ -201,6 +201,15 @@ check_target() {
   case "$check_status" in
     ok)
       local state=ok
+      # The remote host controls this line. Validate the count before any
+      # arithmetic: [[ -gt ]] evaluates array subscripts such as 'x[$(cmd)]'.
+      if [[ ! "$updates" =~ ^[0-9]{1,9}$ ]]; then
+        record_check_error true error REMOTE_CHECK_FAILED "Invalid update count reported by target"
+        printf 'external-linux: %s: invalid update count in remote response\n' "$EXTERNAL_TARGET" >&2
+        return 1
+      fi
+      updates=$((10#$updates))
+      case "$reboot" in true | false | null) ;; *) reboot=null ;; esac
       [[ "$updates" -gt 0 || "$reboot" == true ]] && state=updates_available
       STATUS_MODEL_UPSERT "$EXTERNAL_TARGET" external ssh true "$os_name" "$os_version" "$updater" "$updates" "$reboot" "$state" "" ""
       printf '%s: %s, %s updates, reboot_required=%s\n' "$EXTERNAL_TARGET" "$os_name" "$updates" "$reboot"
