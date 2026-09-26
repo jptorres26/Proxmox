@@ -1395,17 +1395,26 @@ UPDATE_HOST_ITSELF () {
 ############################
 
 # Container Update Start
+# Per-target state must not leak from one guest to the next. Every update
+# step returns early while ERROR_CODE is set, so one failed container used to
+# turn every later VM update into a silent "apt-get update" only run, and a
+# non-root SSH VM left "sudo " behind for the following VMs.
+RESET_TARGET_STATE () {
+  ERROR_CODE="" ERROR_MSG="" ID="" UPDATE_USER=""
+  CCONTAINER="" CVM="" SSH_CONNECTION="" UNIFI=""
+}
+
 CONTAINER_UPDATE_START () {
   # Get the list of containers
   CONTAINERS=$(pct list | tail -n +2 | cut -f1 -d' ')
   # Loop through the containers
   for CONTAINER in $CONTAINERS; do
-    ERROR_CODE=""
+    RESET_TARGET_STATE
     if guest_id_matches "$EXCLUDED" "$CONTAINER"; then
       echo -e "⏩${BL:-} Skipped LXC $CONTAINER by the user${CL:-}\n\n"
     elif [[ "$ONLY" != "" ]] && ! guest_id_matches "$ONLY" "$CONTAINER"; then
       if [[ "$SINGLE_UPDATE" != true ]]; then echo -e "⏩${BL:-} Skipped LXC $CONTAINER by the user${CL:-}\n\n"; else continue; fi
-    elif (pct config "$CONTAINER" | grep template >/dev/null 2>&1); then
+    elif pct config "$CONTAINER" 2>/dev/null | grep -q '^template: 1$'; then
       echo -e "⏩ ${OR:-}LXC $CONTAINER is a template - skip update${CL:-}\n\n"
       continue
     else
@@ -1611,12 +1620,13 @@ VM_UPDATE_START () {
   VMS=$(qm list | tail -n +2 | cut -c -10)
   # Loop through the VMs
   for VM in $VMS; do
+    RESET_TARGET_STATE
     PRE_OS=$(qm config "$VM" | grep ostype || true)
     if guest_id_matches "$EXCLUDED" "$VM"; then
       echo -e "⏩${BL:-} Skipped VM $VM by the user${CL:-}\n\n"
     elif [[ "$ONLY" != "" ]] && ! guest_id_matches "$ONLY" "$VM"; then
       if [[ "$SINGLE_UPDATE" != true ]]; then echo -e "⏩${BL:-} Skipped VM $VM by the user${CL:-}\n\n"; else continue; fi
-    elif (qm config "$VM" | grep template >/dev/null 2>&1); then
+    elif qm config "$VM" 2>/dev/null | grep -q '^template: 1$'; then
       echo -e "⏩${BL:-} ${OR:-}VM $VM is a template - skip update${CL:-}\n\n"
       continue
     elif [[ "$PRE_OS" =~ w ]]; then
@@ -1649,6 +1659,9 @@ VM_UPDATE_START () {
         CAPTURE_POST_UPDATE_STATUS "$VM" cvm
       elif [[ "$STATUS" == "status: running" && "$RUNNING_VM" != true ]]; then
         echo -e "⏩${BL:-} Skipped VM $VM by the user${CL:-}\n\n"
+      elif [[ "$STATUS" == "status: paused" ]]; then
+        # Updating would need the paused (possibly hibernating) guest resumed.
+        echo -e "⏩${BL:-} Skipped VM $VM because it is paused${CL:-}\n\n"
       else
         echo -e "⚠ Can't find status, please report this issue${CL:-}\n\n"
         UPDATE_FAILURE=true
@@ -1743,6 +1756,7 @@ UPDATE_VM () {
           UPDATE_FAILURE=true
           return
         fi
+        UPDATE_USER=""
         if [[ "$USER" != root ]]; then
           UPDATE_USER="sudo "
         fi

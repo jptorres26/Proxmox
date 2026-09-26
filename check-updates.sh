@@ -864,7 +864,7 @@ CONTAINER_CHECK_START () {
       continue
     elif [[ "$ONLY" != "" ]] && ! guest_id_matches "$ONLY" "$CONTAINER"; then
       continue
-    elif (pct config "$CONTAINER" | grep template >/dev/null 2>&1); then
+    elif pct config "$CONTAINER" 2>/dev/null | grep -q '^template: 1$'; then
       continue
     else
       if ! STATUS=$(timeout 10 pct status "$CONTAINER" 2>/dev/null); then
@@ -1130,7 +1130,7 @@ VM_CHECK_START () {
   VMS=$(qm list | tail -n +2 | cut -c -10)
   # Loop through VMs
   for VM in $VMS; do
-    local vm_has_internal_ssh=false
+    local vm_has_internal_ssh=false vm_config
     if declare -f INTERNAL_SSH_HAS_OVERRIDE >/dev/null 2>&1 &&
       INTERNAL_SSH_HAS_OVERRIDE vm "$VM"; then
       vm_has_internal_ssh=true
@@ -1146,10 +1146,15 @@ VM_CHECK_START () {
     if QGA_CONFIG_ENABLED "$VM" ||
       [[ -f $LOCAL_FILES/VMs/"$VM" ]] || [[ "$vm_has_internal_ssh" == true ]]; then
       # Check VM
-      PRE_OS=$(qm config "$VM" | grep 'ostype:' | sed 's/ostype:\s*//')
+      vm_config=$(qm config "$VM" 2>/dev/null || true)
+      PRE_OS=$(printf '%s\n' "$vm_config" | grep 'ostype:' | sed 's/ostype:\s*//')
       if guest_id_matches "$EXCLUDED" "$VM"; then
         continue
       elif [[ "$ONLY" != "" ]] && ! guest_id_matches "$ONLY" "$VM"; then
+        continue
+      elif grep -q '^template: 1$' <<< "$vm_config"; then
+        # Templates (often cloud-init images with the agent enabled) cannot
+        # be started; a check would fail on every run.
         continue
       elif [[ "$PRE_OS" =~ w ]]; then
         continue
