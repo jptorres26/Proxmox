@@ -49,7 +49,10 @@ for normal user-facing output and enable it temporarily for troubleshooting.
 ## Extra updates and scripts
 
 The `PIHOLE`, `IOBROKER`, `PTERODACTYL`, `OCTOPRINT`, `DOCKER_COMPOSE`, and
-`UNIFI` settings control optional extra-update integrations. Set
+`UNIFI` settings control optional extra-update integrations.
+`DOCKER_COMPOSE` pulls and restarts the Compose projects found below
+`COMPOSE_PATH` and afterwards removes only dangling images; stopped
+containers, networks, and volumes are never pruned. Set
 `INCLUDE_HELPER_SCRIPTS` to use scripts under
 `/etc/ultimate-updater/scripts.d/<VMID>/`. An empty `.script-only` marker runs
 only the guest's scripts instead of the built-in package-manager update.
