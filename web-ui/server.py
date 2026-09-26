@@ -122,6 +122,9 @@ DEFAULT_PROXMOX_CUSTOM_KEY = Path("/etc/pve/local/pveproxy-ssl.key")
 TARGET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 CONTENT_LENGTH_RE = re.compile(r"[0-9]{1,7}")
 MAX_REQUEST_BODY = 4096
+UPDATER_VERSION_LOCK = threading.Lock()
+PUBLIC_VERSION_TTL = 6 * 60 * 60   # re-check a successful public version result
+PUBLIC_VERSION_RETRY = 60          # retry an unavailable result
 JOB_RE = re.compile(r"^ultimate-updater-(?:update|check)-[A-Za-z0-9_.-]+$")
 HOST_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
 USER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
@@ -1868,13 +1871,20 @@ def locked_atomic_update(path, updater):
 
 
 class AuthStore:
-    SESSION_SECONDS = 8 * 60 * 60
+    SESSION_SECONDS = 8 * 60 * 60        # idle timeout, extended by activity
+    SESSION_MAX_SECONDS = 12 * 60 * 60   # absolute lifetime; polling cannot extend it
+    LOGIN_ATTEMPTS = 5                   # failed attempts per client and window
+    LOGIN_WINDOW_SECONDS = 60
 
     def __init__(self, path):
         self.path = path
         self.sessions = {}
         self.failed_logins = {}
         self.backend = os.environ.get("UU_AUTH_BACKEND", "pam").strip().lower()
+        self._lock = threading.Lock()
+        # PAM verification is slow by design (pam_faildelay); bound how many
+        # run at once so parallel requests cannot multiply password guesses.
+        self._verify_slots = threading.BoundedSemaphore(2)
 
     @property
     def configured(self):
@@ -1888,51 +1898,91 @@ class AuthStore:
         except (OSError, ValueError, TypeError):
             return False
 
-    def verify(self, username, password):
+    def verify(self, username, password, client=None):
+        # NUL bytes never belong in credentials: PAM would truncate at them and
+        # HMAC zero-pads short keys, so PBKDF2 treats "pw" and "pw\0" alike.
+        if "\x00" in username or "\x00" in password:
+            return False
         if self.backend == "pam":
-            return username == "root" and pam_authenticate is not None and pam_authenticate(username, password)
+            return (username == "root" and pam_authenticate is not None
+                    and pam_authenticate(username, password, rhost=client))
         if self.backend != "internal":
             return False
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
-            if not hmac.compare_digest(str(data.get("username", "")), username):
-                return False
             salt = base64.b64decode(data["salt"])
             expected = base64.b64decode(data["password_hash"])
+            # Always derive the hash so response time does not reveal whether
+            # the username matched.
             actual = hashlib.pbkdf2_hmac("sha256", password.encode(), salt,
                                          int(data.get("iterations", 210000)))
-            return hmac.compare_digest(actual, expected)
+            user_matches = hmac.compare_digest(str(data.get("username", "")).encode(), username.encode())
+            return hmac.compare_digest(actual, expected) and user_matches
         except (OSError, ValueError, TypeError, KeyError):
             return False
 
+    def _prune(self, now):
+        """Drop expired sessions and finished rate-limit windows (lock held)."""
+        wall = time.time()
+        for token, item in list(self.sessions.items()):
+            if item["expires"] <= wall or wall - item["created"] >= self.SESSION_MAX_SECONDS:
+                del self.sessions[token]
+        for client, (_attempts, window) in list(self.failed_logins.items()):
+            if now - window >= self.LOGIN_WINDOW_SECONDS:
+                del self.failed_logins[client]
+
     def login(self, username, password, client):
-        now = time.time()
-        attempts, window = self.failed_logins.get(client, (0, now))
-        if now - window >= 60:
-            attempts, window = 0, now
-        if attempts >= 5:
-            return None
-        if not self.verify(username, password):
+        now = time.monotonic()
+        with self._lock:
+            self._prune(now)
+            attempts, window = self.failed_logins.get(client, (0, now))
+            if now - window >= self.LOGIN_WINDOW_SECONDS:
+                attempts, window = 0, now
+            if attempts >= self.LOGIN_ATTEMPTS:
+                log_auth_event("rate-limited", username, client)
+                return None
+            # Count the attempt before the slow verification; otherwise
+            # parallel requests all pass this check before any failure lands.
             self.failed_logins[client] = (attempts + 1, window)
+        verified = False
+        if self._verify_slots.acquire(timeout=10):
+            try:
+                verified = self.verify(username, password, client)
+            finally:
+                self._verify_slots.release()
+        log_auth_event("succeeded" if verified else "failed", username, client)
+        if not verified:
             return None
-        self.failed_logins.pop(client, None)
-        token = secrets.token_urlsafe(32)
-        csrf = secrets.token_urlsafe(32)
-        self.sessions[token] = {"user": username, "csrf": csrf, "expires": time.time() + self.SESSION_SECONDS}
+        created = time.time()
+        with self._lock:
+            self.failed_logins.pop(client, None)
+            token = secrets.token_urlsafe(32)
+            csrf = secrets.token_urlsafe(32)
+            self.sessions[token] = {"user": username, "csrf": csrf, "created": created,
+                                    "expires": created + self.SESSION_SECONDS}
         return token, csrf
 
     def session(self, token):
-        item = self.sessions.get(token)
-        if not item:
-            return None
-        if item["expires"] <= time.time():
-            self.sessions.pop(token, None)
-            return None
-        item["expires"] = time.time() + self.SESSION_SECONDS
-        return item
+        now = time.time()
+        with self._lock:
+            item = self.sessions.get(token)
+            if not item:
+                return None
+            if item["expires"] <= now or now - item["created"] >= self.SESSION_MAX_SECONDS:
+                self.sessions.pop(token, None)
+                return None
+            item["expires"] = now + self.SESSION_SECONDS
+            return item
 
     def logout(self, token):
-        self.sessions.pop(token, None)
+        with self._lock:
+            self.sessions.pop(token, None)
+
+
+def log_auth_event(outcome, username, client):
+    """Record login results in the journal (visible to fail2ban and auditing)."""
+    # repr() keeps a hostile username from forging additional log lines.
+    print(f"Web UI login {outcome} for user {username[:64]!r} from {client}", flush=True)
 
 
 class UpdaterServer(ThreadingHTTPServer):
@@ -2175,16 +2225,21 @@ class StatusHandler(BaseHTTPRequestHandler):
 
     def _refresh_updater_version(self):
         try:
-            data = self.updater_version(force=True)
-        except (OSError, RuntimeError, subprocess.TimeoutExpired):
-            data = {"state": "unavailable", "branch": None, "installed": None,
-                    "available": None, "commit": "unknown", "available_commit": "unknown",
-                    "tag": None, "update_available": False, "components": []}
-        data["update_state"] = "available" if data.get("update_available") else (
-            "up_to_date" if data.get("state") == "ok" else "unavailable")
-        self.server.version_last_data = data
-        with self.server.version_refresh_lock:
-            self.server.version_refresh_running = False
+            try:
+                data = dict(self.updater_version(force=True))
+            except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired):
+                data = {"state": "unavailable", "branch": None, "installed": None,
+                        "available": None, "commit": "unknown", "available_commit": "unknown",
+                        "tag": None, "update_available": False, "components": []}
+            data["update_state"] = "available" if data.get("update_available") else (
+                "up_to_date" if data.get("state") == "ok" else "unavailable")
+            self.server.version_last_data = data
+            self.server.version_last_checked = time.monotonic()
+        finally:
+            # Always clear the flag; a crashed refresh must not leave the
+            # login page reporting "checking" forever.
+            with self.server.version_refresh_lock:
+                self.server.version_refresh_running = False
 
     def start_version_refresh(self):
         with self.server.version_refresh_lock:
@@ -2196,6 +2251,10 @@ class StatusHandler(BaseHTTPRequestHandler):
     def public_version(self):
         local = self.local_version()
         cached = getattr(self.server, "version_last_data", None)
+        checked = getattr(self.server, "version_last_checked", None)
+        ttl = PUBLIC_VERSION_TTL if cached and cached.get("state") == "ok" else PUBLIC_VERSION_RETRY
+        if cached and checked is not None and time.monotonic() - checked >= ttl:
+            self.start_version_refresh()  # serve the cached result meanwhile
         if cached:
             if cached.get("state") == "ok":
                 result = {**local, **cached}
@@ -2208,10 +2267,16 @@ class StatusHandler(BaseHTTPRequestHandler):
         return local
 
     def updater_version(self, force=False):
-        now = time.monotonic()
-        cached = getattr(self.server, "version_cache", None)
-        if not force and cached and now - cached["at"] < 300:
-            return cached["data"]
+        # One version check (up to 45 s of network access) at a time; a forced
+        # refresh shortly after a successful one reuses that result.
+        with UPDATER_VERSION_LOCK:
+            now = time.monotonic()
+            cached = getattr(self.server, "version_cache", None)
+            if cached and now - cached["at"] < (30 if force else 300):
+                return cached["data"]
+            return self._check_updater_version(now)
+
+    def _check_updater_version(self, now):
         try:
             if not self.server.update_script.is_file() or not self.server.update_script.stat().st_mode & 0o111:
                 raise OSError("update script is unavailable")
@@ -2910,13 +2975,6 @@ class StatusHandler(BaseHTTPRequestHandler):
             except (OSError, ValueError, subprocess.TimeoutExpired):
                 self.send_json(error_payload("INTERNAL_SSH_UNAVAILABLE", "Internal SSH configuration is invalid or unavailable."), HTTPStatus.UNPROCESSABLE_ENTITY)
             return
-        if len([part for part in path.split("/") if part]) == 5 and path.startswith("/api/internal-ssh/") and path.endswith("/test"):
-            parts = [unquote(part) for part in path.split("/") if part]
-            try:
-                self.handle_internal_ssh_test(parts[2], parts[3])
-            except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
-                self.send_json(error_payload("SSH_TEST_FAILED", "The connection test could not be completed."), HTTPStatus.BAD_GATEWAY)
-            return
         if len([part for part in path.split("/") if part]) == 3 and path.startswith("/api/external-settings/"):
             target_id = unquote(path.rsplit("/", 1)[-1])
             try:
@@ -3040,7 +3098,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                 return
             token, csrf = login
             secure = "; Secure" if getattr(self.server, "tls_enabled", False) or self.headers.get("X-Forwarded-Proto", "").lower() == "https" else ""
-            cookie = f"UU_SESSION={token}; Path=/; Max-Age={AuthStore.SESSION_SECONDS}; HttpOnly; SameSite=Lax{secure}"
+            cookie = f"UU_SESSION={token}; Path=/; Max-Age={AuthStore.SESSION_MAX_SECONDS}; HttpOnly; SameSite=Strict{secure}"
             self.send_json_with_cookie({"authenticated": True, "username": username, "csrf": csrf}, cookie)
             return
         if parts == ["api", "logout"]:
@@ -3050,7 +3108,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             token = next((part.strip().split("=", 1)[1] for part in cookie.split(";")
                           if part.strip().startswith("UU_SESSION=")), "")
             self.server.auth.logout(token)
-            self.send_json_with_cookie({"authenticated": False}, "UU_SESSION=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
+            self.send_json_with_cookie({"authenticated": False}, "UU_SESSION=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict")
             return
         if not self.write_allowed():
             return
