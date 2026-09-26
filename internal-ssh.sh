@@ -14,7 +14,8 @@ declare -A INTERNAL_SSH_VALUES=()
 INTERNAL_SSH_FAIL() { INTERNAL_SSH_ERROR="$1"; return 1; }
 
 INTERNAL_SSH_VALID_ID() { [[ "${1:-}" =~ ^[A-Za-z0-9_.:-]+$ ]]; }
-INTERNAL_SSH_VALID_HOST() { [[ "${1:-}" =~ ^[A-Za-z0-9_.:-]+$ ]]; }
+# Never starting with "-": a node host is passed to ssh on its own.
+INTERNAL_SSH_VALID_HOST() { [[ "${1:-}" =~ ^[A-Za-z0-9_:][A-Za-z0-9_.:-]*$ ]]; }
 INTERNAL_SSH_VALID_USER() { [[ "${1:-}" =~ ^[A-Za-z_][A-Za-z0-9_.-]*$ ]]; }
 INTERNAL_SSH_VALID_PORT() { [[ "${1:-}" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 )); }
 

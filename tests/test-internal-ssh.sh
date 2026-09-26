@@ -45,6 +45,13 @@ if INTERNAL_SSH_LOAD "$WORK_DIR/invalid.conf"; then
   echo 'invalid port was accepted' >&2
   exit 1
 fi
+# A host that ssh would read as an option is rejected (node hosts are passed
+# to ssh without user@).
+(
+  source "$ROOT_DIR/internal-ssh.sh"
+  INTERNAL_SSH_VALID_HOST 192.0.2.1 && INTERNAL_SSH_VALID_HOST pve-2.lan && INTERNAL_SSH_VALID_HOST ::1
+  ! INTERNAL_SSH_VALID_HOST -v && ! INTERNAL_SSH_VALID_HOST -oProxyCommand
+)
 if grep -Eq '(^|[[:space:]])(source|eval)[[:space:]]' "$ROOT_DIR/internal-ssh.sh"; then
   echo 'internal SSH parser must not source or eval configuration' >&2
   exit 1
