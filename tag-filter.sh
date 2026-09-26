@@ -80,6 +80,27 @@ version_is_less() {
 
 VERSION_CACHE_FILE=${VERSION_CACHE_FILE:-/var/cache/ultimate-updater/versions}
 VERSION_CACHE_TTL=${VERSION_CACHE_TTL:-21600}
+UPSTREAM_REPOSITORY="BassT23/Proxmox"
+
+# Print the GitHub repository (owner/name) that updates are downloaded from:
+# UU_REPOSITORY when set, otherwise the repository recorded by the installer
+# in build-metadata, otherwise the upstream project. Forks install with
+# UU_REPOSITORY=owner/name and keep updating from their own repository.
+UU_SOURCE_REPOSITORY() {
+  local repository=${UU_REPOSITORY:-} metadata
+  metadata=${UU_BUILD_METADATA_FILE:-${LOCAL_FILES:-/etc/ultimate-updater}/build-metadata}
+  if [[ -z "$repository" && -r "$metadata" ]]; then
+    repository=$(awk -F'"' '/^repository=/ {print $2; exit}' "$metadata")
+  fi
+  if [[ -z "$repository" ]]; then
+    repository=$UPSTREAM_REPOSITORY
+  elif [[ ! "$repository" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$ ||
+          "$repository" == */. || "$repository" == */.. ]]; then
+    printf 'Ignoring invalid source repository %q; using %s.\n' "$repository" "$UPSTREAM_REPOSITORY" >&2
+    repository=$UPSTREAM_REPOSITORY
+  fi
+  printf '%s\n' "$repository"
+}
 
 FETCH_REMOTE_VERSION() {
   local branch=$1 component=$2 max_time=${3:-10} content version headers body http_code retry_after attempt
@@ -91,7 +112,7 @@ FETCH_REMOTE_VERSION() {
     : > "$body"
     http_code=$(curl -4 -sS -fSL --retry 0 --connect-timeout 3 --max-time "$max_time" \
       -D "$headers" -o "$body" -w '%{http_code}' \
-      "https://raw.githubusercontent.com/BassT23/Proxmox/$branch/$component" 2>/dev/null) || true
+      "https://raw.githubusercontent.com/$(UU_SOURCE_REPOSITORY)/$branch/$component" 2>/dev/null) || true
     if [[ -s "$body" ]]; then
       break
     fi
@@ -122,8 +143,15 @@ UPDATE_VERSION_CACHE() {
   local master_version beta_version develop_version cache_dir temp_file
 
   master_version=$(FETCH_REMOTE_VERSION master update.sh 5) || return 1
-  beta_version=$(FETCH_REMOTE_VERSION beta update.sh 5) || return 1
-  develop_version=$(FETCH_REMOTE_VERSION develop update.sh 5) || return 1
+  if [[ "$(UU_SOURCE_REPOSITORY)" == "$UPSTREAM_REPOSITORY" ]]; then
+    beta_version=$(FETCH_REMOTE_VERSION beta update.sh 5) || return 1
+    develop_version=$(FETCH_REMOTE_VERSION develop update.sh 5) || return 1
+  else
+    # Forks often publish only master; treat missing pre-release branches as
+    # carrying the master version instead of never refreshing the cache.
+    beta_version=$(FETCH_REMOTE_VERSION beta update.sh 5 2>/dev/null) || beta_version=$master_version
+    develop_version=$(FETCH_REMOTE_VERSION develop update.sh 5 2>/dev/null) || develop_version=$master_version
+  fi
   cache_dir=${VERSION_CACHE_FILE%/*}
   mkdir -p "$cache_dir" || return 1
   temp_file=$(mktemp "$cache_dir/.versions.XXXXXX") || return 1
