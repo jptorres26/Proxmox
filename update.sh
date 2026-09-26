@@ -1379,6 +1379,14 @@ UPDATE_HOST_IS_LOCAL () {
   return 1
 }
 
+# A VM is updated over SSH when it has a legacy profile in VMs/<id> or an
+# enabled Internal SSH override; checks already used both, updates only the
+# legacy file.
+VM_HAS_SSH_PROFILE () {
+  [[ -f "$LOCAL_FILES/VMs/$1" ]] && return 0
+  declare -f INTERNAL_SSH_HAS_OVERRIDE >/dev/null 2>&1 && INTERNAL_SSH_HAS_OVERRIDE vm "$1"
+}
+
 # Host Update
 UPDATE_HOST () {
   HOST=$1
@@ -1729,7 +1737,7 @@ VM_UPDATE_START () {
         echo -e "⏩${BL:-} Skipped VM $VM because it is hibernated${CL:-}\n\n"
       elif [[ "$STATUS" == "status: stopped" && "$STOPPED_VM" == true ]]; then
         # Check if update is possible
-        if QGA_CONFIG_ENABLED "$VM" || [[ -f $LOCAL_FILES/VMs/$VM ]]; then
+        if QGA_CONFIG_ENABLED "$VM" || VM_HAS_SSH_PROFILE "$VM"; then
           # Start the VM
           WILL_STOP="true"
           echo -e " ▶${GN:-} Starting VM${BL:-} $VM ${CL:-}"
@@ -1797,17 +1805,37 @@ UPDATE_VM () {
     return
   fi
   # Read SSH config file - check how update is possible
-  if [[ -f $LOCAL_FILES/VMs/"$VM" ]]; then
-    IP=$(awk -F'"' '/^IP=/ {print $2; exit}' "$LOCAL_FILES/VMs/$VM")
-    USER=$(awk -F'"' '/^USER=/ {print $2; exit}' "$LOCAL_FILES/VMs/$VM")
-    USER="${USER:-root}"
-    SSH_VM_PORT=$(awk -F'"' '/^SSH_VM_PORT=/ {print $2; exit}' "$LOCAL_FILES/VMs/$VM")
-    SSH_VM_PORT="${SSH_VM_PORT:-22}"
-    SSH_START_DELAY_TIME=$(awk -F'"' '/^SSH_START_DELAY_TIME=/ {print $2; exit}' "$LOCAL_FILES/VMs/$VM")
-    SSH_START_DELAY_TIME="${SSH_START_DELAY_TIME:-45}"
-    INTERNAL_SSH_RESOLVE_VM "$VM" "${IP:-}" "${USER:-root}" "${SSH_VM_PORT:-22}" || return 1
-    [[ "${INTERNAL_SSH_ENABLED:-true}" == true ]] || return 1
+  if VM_HAS_SSH_PROFILE "$VM"; then
+    IP="" USER=root SSH_VM_PORT=22 SSH_START_DELAY_TIME=45
+    if [[ -f "$LOCAL_FILES/VMs/$VM" ]]; then
+      IP=$(awk -F'"' '/^IP=/ {print $2; exit}' "$LOCAL_FILES/VMs/$VM")
+      USER=$(awk -F'"' '/^USER=/ {print $2; exit}' "$LOCAL_FILES/VMs/$VM")
+      USER="${USER:-root}"
+      SSH_VM_PORT=$(awk -F'"' '/^SSH_VM_PORT=/ {print $2; exit}' "$LOCAL_FILES/VMs/$VM")
+      SSH_VM_PORT="${SSH_VM_PORT:-22}"
+      SSH_START_DELAY_TIME=$(awk -F'"' '/^SSH_START_DELAY_TIME=/ {print $2; exit}' "$LOCAL_FILES/VMs/$VM")
+      SSH_START_DELAY_TIME="${SSH_START_DELAY_TIME:-45}"
+    fi
+    # An unreadable internal-ssh.conf used to skip the VM without an error.
+    if ! INTERNAL_SSH_RESOLVE_VM "$VM" "${IP:-}" "${USER:-root}" "${SSH_VM_PORT:-22}"; then
+      ERROR_CODE=1
+      ID=$VM
+      ERROR_MSG="Internal SSH configuration is invalid: ${INTERNAL_SSH_ERROR:-unknown error}"
+      ERROR
+      CVM=""
+      return 1
+    fi
+    # A disabled override means "do not use SSH" (see docs/ssh.md): update
+    # through the guest agent instead of skipping the VM.
+    if [[ "${INTERNAL_SSH_ENABLED:-true}" != true ]]; then
+      UPDATE_VM_QEMU
+      return
+    fi
     IP="${INTERNAL_SSH_HOST:-$IP}"; USER="${INTERNAL_SSH_USER:-$USER}"; SSH_VM_PORT="${INTERNAL_SSH_PORT:-$SSH_VM_PORT}"; INTERNAL_SSH_USE_IDENTITY
+    if [[ -z "$IP" ]]; then
+      UPDATE_VM_QEMU
+      return
+    fi
     if [[ "$START_WAITING" == true ]]; then
       echo -e "⏳${OR:-} Wait for bootup${CL:-}"
       echo -e "ℹ ${OR:-} $SSH_START_DELAY_TIME seconds is set for sleep between tryouts in SSH-VM config file${CL:-}\n"
@@ -1817,11 +1845,11 @@ UPDATE_VM () {
         return
       fi
     fi
-    if ! RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" exit >/dev/null 2>&1; then
+    if ! RUN_SSH_IDENTITY_FILE="${INTERNAL_SSH_IDENTITY_FILE:-}" RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" exit </dev/null >/dev/null 2>&1; then
       echo -e "${RD:-}  ❌ File for ssh connection found, but not correctly set?\n\
   ${BL:-}Please check SSH Key-Based Authentication${CL:-}\n\
   Infos can be found here:<https://github.com/BassT23/Proxmox/blob/${INSTALLED_BRANCH:-master}/ssh.md>
-  Try to use QEMU insead\n"
+  Try to use QEMU instead\n"
       START_WAITING=false
       UPDATE_VM_QEMU
     else
