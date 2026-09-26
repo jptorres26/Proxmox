@@ -12,9 +12,11 @@ journalctl -u ultimate-updater-web
 ```
 
 The default port is `8765`. Confirm the configured port and firewall path.
-With automatic HTTPS, a missing Proxmox certificate may cause the documented
-HTTP transition fallback; explicitly required HTTPS reports an unusable
-certificate as an error.
+On a Proxmox VE node, a missing or unreadable node certificate stops the
+service with "Proxmox node certificate is not available yet" and systemd
+retries every five seconds; check `pvecm status` and
+`ls -l /etc/pve/local/pve-ssl.*`. Explicitly required HTTPS
+(`WEB_UI_HTTPS=true`) reports an unusable certificate as an error.
 
 ## SSH connection failed
 

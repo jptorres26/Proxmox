@@ -10,9 +10,12 @@ https://<proxmox-node>:8765/
 ```
 
 It uses the Proxmox-managed certificate when available, accepts TLS 1.2 or
-newer, and can use an explicitly configured certificate pair. If automatic
-HTTPS has no usable certificate, the documented transition fallback is HTTP;
-set `WEB_UI_HTTPS=true` when HTTPS must be required. Use the trusted
+newer, and can use an explicitly configured certificate pair. Renewed
+certificates (ACME, `pvenode cert set`) are picked up within ten minutes
+without a restart. On a Proxmox VE node the service does not start without a
+certificate: it waits for `pve-cluster` and retries instead of serving plain
+HTTP. Elsewhere, automatic HTTPS without a usable certificate falls back to
+HTTP; set `WEB_UI_HTTPS=true` when HTTPS must be required. Use the trusted
 management network; this is an action-enabled administrator interface.
 
 ## Main areas
