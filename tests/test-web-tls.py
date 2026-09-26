@@ -102,4 +102,9 @@ unit = (Path(__file__).parents[1] / "ultimate-updater-web.service").read_text()
 assert "After=network-online.target pve-cluster.service" in unit
 assert "Environment=WEB_UI_PORT=8765" in unit
 assert unit.index("Environment=WEB_UI_PORT=8765") < unit.index("EnvironmentFile=")
+# The UI's process tree runs pct exec, qm start, ssh, and ctypes PAM callbacks.
+directives = {line.split("=", 1)[0] for line in unit.splitlines() if "=" in line and not line.startswith("#")}
+for unsafe in ("ProtectClock", "PrivateDevices", "ProtectControlGroups", "RestrictNamespaces",
+               "ProtectProc", "ProtectHome", "MemoryDenyWriteExecute", "CapabilityBoundingSet"):
+    assert unsafe not in directives, unsafe
 print("Web UI TLS reload and Proxmox node guard: PASS")
