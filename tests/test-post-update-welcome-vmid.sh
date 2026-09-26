@@ -11,7 +11,11 @@ update = pathlib.Path(sys.argv[1]).read_text()
 check = pathlib.Path(sys.argv[2]).read_text()
 
 welcome = update.split('UPDATE_CHECK () {', 1)[1].split('\n}\n', 1)[0]
-assert ' -u cvm \\"$VM\\"' in welcome
+# The check runs in a new process: both guest types pass their ID.
+assert ' -u cvm "$VM"' in welcome
+assert ' -u ccontainer "$CONTAINER"' in welcome
+# Not over ssh to the node itself, which lost the job's LOCAL_FILES.
+assert 'ssh ' not in welcome
 assert 'status_target="$VM"' in welcome
 
 lifecycle = check.split('CHECK_VM_LIFECYCLE () {', 1)[1].split('\n}\n', 1)[0]

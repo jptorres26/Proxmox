@@ -1074,16 +1074,20 @@ EXTRAS () {
 # Trim Filesystem
 TRIM_FILESYSTEM() {
   if [[ "$INCLUDE_FSTRIM" == true ]]; then
-    local ROOT_FS
+    local ROOT_FS ignore_mountpoints=1
     ROOT_FS=$(df -Th "/" | awk 'NR==2 {print $2}')
+    # FSTRIM_WITH_MOUNTPOINT=true includes mount points ("Include mount
+    # points in fstrim"); it used to be passed as --ignore-mountpoints.
+    [[ "${FSTRIM_WITH_MOUNTPOINT:-true}" == true ]] && ignore_mountpoints=0
     local LVS
-    mapfile -t LVS < <(lvs | awk -F '[[:space:]]+' 'NR>1 && (/Data%|'"vm-$CONTAINER"'/) {gsub(/%/, "", $7); print $7}')
+    # Only this container's disks: /vm-101/ also matched vm-1010-disk-0.
+    mapfile -t LVS < <(lvs | awk -F '[[:space:]]+' -v id="$CONTAINER" 'NR>1 && $2 ~ ("^vm-" id "-disk-") {gsub(/%/, "", $7); print $7}')
     if [[ ${#LVS[@]} -gt 0 ]] && [[ "$ROOT_FS" == "ext4" ]]; then
       echo -e "${OR:-}--- Trimming filesystem ---${CL:-}"
       echo -e "${RD:-}Data before trim: ${LVS[*]}%${CL:-}"
-      pct fstrim "$CONTAINER" --ignore-mountpoints "$FSTRIM_WITH_MOUNTPOINT"
+      pct fstrim "$CONTAINER" --ignore-mountpoints "$ignore_mountpoints"
       local LVS_AFTER
-      mapfile -t LVS_AFTER < <(lvs | awk -F '[[:space:]]+' 'NR>1 && (/Data%|'"vm-$CONTAINER"'/) {gsub(/%/, "", $7); print $7}')
+      mapfile -t LVS_AFTER < <(lvs | awk -F '[[:space:]]+' -v id="$CONTAINER" 'NR>1 && $2 ~ ("^vm-" id "-disk-") {gsub(/%/, "", $7); print $7}')
       echo -e "${GN:-}Data after trim: ${LVS_AFTER[*]}%${CL:-}\n"
       sleep 1.5
     fi
@@ -1092,6 +1096,9 @@ TRIM_FILESYSTEM() {
 
 # Dist Upgrade
 DIST_UPGRADE () {
+  # The upgrade stops on the first error; `local -` restores the shell
+  # options on return instead of leaving set -e on for the rest of the run.
+  local -
   # debian 12 -> 13
   DEB_VERSION=$(pct exec "$CONTAINER" -- bash -c "grep -oP '(?<=^VERSION_ID=).+' /etc/os-release | tr -d '\"'")
   if [[ "$DEB_VERSION" == "12" ]]; then
@@ -1133,7 +1140,8 @@ DIST_UPGRADE () {
         read -p "Type [Y/y] for yes - anything else will skip: " -r
         if [[ $REPLY =~ ^[Yy]$ || $REPLY = "" ]]; then
           echo -e "${OR:-}--- Change Repo to Trixie ---\n${CL:-}"
-          pct exec "$CONTAINER" -- bash -c "sed -i 's/bookworm/trixie/g' /etc/apt/sources.list"
+          # deb822-only guests have no sources.list.
+          pct exec "$CONTAINER" -- sh -c "[ ! -f /etc/apt/sources.list ] || sed -i 's/bookworm/trixie/g' /etc/apt/sources.list"
           pct exec "$CONTAINER" -- bash -c "find /etc/apt/sources.list.d -type f -exec sed -i 's/bookworm/trixie/g' {} \;"
           echo -e "${OR:-}--- APT UPDATE for Trixie ---${CL:-}"
           pct exec "$CONTAINER" -- bash -c "apt-get update -y"
@@ -1150,7 +1158,11 @@ DIST_UPGRADE () {
         fi
       else
         echo -e "❌${RD:-} need more space, pls clean up or resize disk, by yourself\n${CL:-}"
-        exit 100
+        ERROR_CODE=1
+        ID=$CONTAINER
+        ERROR_MSG="Less than 5 GB free on / - distribution upgrade not started"
+        ERROR
+        return 1
       fi
     else
       echo -e "❌${BL:-} skipped\n${CL:-}"
@@ -1168,22 +1180,23 @@ UPDATE_CHECK () {
     local status_target=""
     echo -e "${OR:-}--- Check Status for Welcome-Screen ---${CL:-}"
     if [[ "$CHOST" == true ]]; then
-#      ssh -q -p "$SSH_PORT" "$HOSTNAME" "\"$LOCAL_FILES/check-updates.sh\" -u chost" | tee -a "$LOCAL_FILES/check-output"
       STATUS_MODEL_PARTIAL=true "$LOCAL_FILES/check-updates.sh" -u chost | tee -a "$LOCAL_FILES/check-output"
       status_target="host:$HOSTNAME"
     elif [[ "$CCONTAINER" == true ]]; then
-#      ssh -q -p "$SSH_PORT" "$HOSTNAME" "\"$LOCAL_FILES/check-updates.sh\" -u ccontainer" | tee -a $LOCAL_FILES/check-output
-      STATUS_MODEL_PARTIAL=true "$LOCAL_FILES/check-updates.sh" -u ccontainer | tee -a "$LOCAL_FILES/check-output"
+      # Pass the ID: the check runs in a new process that does not know it.
+      STATUS_MODEL_PARTIAL=true "$LOCAL_FILES/check-updates.sh" -u ccontainer "$CONTAINER" | tee -a "$LOCAL_FILES/check-output"
       status_target="$CONTAINER"
     elif [[ "$CVM" == true ]]; then
-      ssh -q -p "$SSH_PORT" "$HOSTNAME" "\"$LOCAL_FILES/check-updates.sh\" -u cvm \"$VM\"" | tee -a $LOCAL_FILES/check-output
+      STATUS_MODEL_PARTIAL=true "$LOCAL_FILES/check-updates.sh" -u cvm "$VM" | tee -a "$LOCAL_FILES/check-output"
       status_target="$VM"
     fi
     if [[ -n "$status_target" ]] && declare -f STATUS_MODEL_UPDATE_RESULT >/dev/null 2>&1; then
       STATUS_MODEL_UPDATE_RESULT "$status_target" success 0 || true
     fi
     echo -e "${GN:-}---          Finished check         ---${CL:-}\n"
-    [[ "$WILL_STOP" != true ]] && echo
+    # Not `[[ ]] && echo`: that returns 1 for a started guest, and with
+    # EXIT_ON_ERROR=true (set -e) the run ended before the guest was stopped.
+    if [[ "$WILL_STOP" != true ]]; then echo; fi
   else
     echo
   fi
@@ -1326,8 +1339,16 @@ CHECK_QGA_EXEC () {
 
 # Host Update Start
 HOST_UPDATE_START () {
-  if [[ "$RICM" != true ]]; then true > $LOCAL_FILES/check-output; fi
+  # A node's Internal SSH port override applies to that node only; it used
+  # to replace the global SSH_PORT for every following node.
+  local default_ssh_port="$SSH_PORT" SSH_PORT
+  if [[ "$RICM" != true ]]; then true > "$LOCAL_FILES/check-output"; fi
   for HOST in $HOSTS; do
+    SSH_PORT="$default_ssh_port"
+    if STOP_AFTER_FAILURE; then
+      echo -e "⏩${OR:-} Skipped node $HOST: an earlier update failed and continuing after errors is disabled${CL:-}\n"
+      continue
+    fi
     HOST_NODE=$(awk -v address="$HOST" '/name[[:space:]]*:/ { name=$2 } /ring0_addr[[:space:]]*:/ && $2 == address { print name; found=1; exit } END { if (!found) print address }' /etc/pve/corosync.conf 2>/dev/null)
     INTERNAL_SSH_RESOLVE_NODE "$HOST_NODE" "$HOST" "$SSH_PORT" || { UPDATE_FAILURE=true; continue; }
     [[ "${INTERNAL_SSH_ENABLED:-true}" == true ]] || { UPDATE_FAILURE=true; continue; }
@@ -1344,39 +1365,42 @@ HOST_UPDATE_START () {
   done
 }
 
+# Is a cluster node address this node? Corosync often uses a dedicated
+# network, so `hostname -i` (the management address) is not enough; a
+# node mistaken for remote copied the installation onto itself over scp.
+UPDATE_HOST_IS_LOCAL () {
+  local candidate="$1" address
+  [[ "$candidate" == "$HOSTNAME" || "$candidate" == "$(hostname -s 2>/dev/null)" ||
+    "$candidate" == "$(hostname -f 2>/dev/null)" ]] && return 0
+  [[ -n "${HOST_NODE:-}" && "$HOST_NODE" == "$(hostname -s 2>/dev/null)" ]] && return 0
+  for address in $(hostname -I 2>/dev/null) $(hostname -i 2>/dev/null); do
+    [[ "$candidate" == "$address" ]] && return 0
+  done
+  return 1
+}
+
 # Host Update
 UPDATE_HOST () {
   HOST=$1
-  START_HOST=$(hostname -i | cut -d ' ' -f1)
-  if [[ "$HOST" != "$START_HOST" ]]; then
-    ssh -q -p "$SSH_PORT" "$HOST" mkdir -p $LOCAL_FILES/temp
+  local local_node=false scp_host="$HOST" file
+  UPDATE_HOST_IS_LOCAL "$HOST" && local_node=true
+  [[ "$HOST" == *:* ]] && scp_host="[$HOST]"   # IPv6 in scp host:path syntax
+  if [[ "$local_node" != true ]]; then
+    ssh -q -p "$SSH_PORT" "$HOST" mkdir -p "$LOCAL_FILES/temp"
     ssh -q -p "$SSH_PORT" "$HOST" "if [[ -f $LOCAL_FILES/update.conf ]]; then cp -p $LOCAL_FILES/update.conf $LOCAL_FILES/update.conf.uu-backup; else rm -f $LOCAL_FILES/update.conf.uu-backup; fi"
-    scp "$0" "$HOST":$LOCAL_FILES/update
-    scp $LOCAL_FILES/update-extras.sh "$HOST":$LOCAL_FILES/update-extras.sh
-    scp $LOCAL_FILES/update.conf "$HOST":$LOCAL_FILES/update.conf
-    if [[ -f $LOCAL_FILES/update.conf.dist ]]; then
-      scp $LOCAL_FILES/update.conf.dist "$HOST":$LOCAL_FILES/update.conf.dist
-    fi
+    # scp takes the port as -P; without it every copy went to port 22.
+    scp -P "$SSH_PORT" "$0" "$scp_host:$LOCAL_FILES/update"
+    for file in update-extras.sh update.conf update.conf.dist tag-filter.sh target-runtime.sh \
+      internal-ssh.sh cluster-target.sh qga-guest-exec.sh; do
+      [[ -f "$LOCAL_FILES/$file" ]] || continue
+      scp -P "$SSH_PORT" "$LOCAL_FILES/$file" "$scp_host:$LOCAL_FILES/$file"
+    done
     if [[ "$WELCOME_SCREEN" == true ]]; then
-      scp $LOCAL_FILES/check-updates.sh "$HOST":$LOCAL_FILES/check-updates.sh
-      scp $LOCAL_FILES/check-output "$HOST":$LOCAL_FILES/check-output
+      scp -P "$SSH_PORT" "$LOCAL_FILES/check-updates.sh" "$scp_host:$LOCAL_FILES/check-updates.sh"
+      scp -P "$SSH_PORT" "$LOCAL_FILES/check-output" "$scp_host:$LOCAL_FILES/check-output"
     fi
-    scp /etc/ultimate-updater/temp/exec_host "$HOST":/etc/ultimate-updater/temp
-    scp -r $LOCAL_FILES/VMs/ "$HOST":$LOCAL_FILES/
-    if [[ -f $LOCAL_FILES/tag-filter.sh ]]; then
-      scp $LOCAL_FILES/tag-filter.sh "$HOST":$LOCAL_FILES/tag-filter.sh
-    fi
-    if [[ -f "$LOCAL_FILES/target-runtime.sh" ]]; then
-      scp "$LOCAL_FILES/target-runtime.sh" "$HOST":$LOCAL_FILES/target-runtime.sh
-    fi
-    if [[ -f "$LOCAL_FILES/internal-ssh.sh" ]]; then
-      scp "$LOCAL_FILES/internal-ssh.sh" "$HOST":$LOCAL_FILES/internal-ssh.sh
-    fi
-    if [[ -f "$LOCAL_FILES/cluster-target.sh" ]]; then
-      scp "$LOCAL_FILES/cluster-target.sh" "$HOST":$LOCAL_FILES/cluster-target.sh
-    fi
-    if [[ -f "$LOCAL_FILES/qga-guest-exec.sh" ]]; then
-      scp "$LOCAL_FILES/qga-guest-exec.sh" "$HOST":$LOCAL_FILES/qga-guest-exec.sh
+    if [[ -d "$LOCAL_FILES/VMs" ]]; then
+      scp -P "$SSH_PORT" -r "$LOCAL_FILES/VMs/" "$scp_host:$LOCAL_FILES/"
     fi
   fi
   local remote_mode="-c host"
@@ -1393,7 +1417,7 @@ UPDATE_HOST () {
   ssh -q -p "$SSH_PORT" "$HOST" \
     "f=\$(mktemp /tmp/ultimate-updater-run.XXXXXX) || exit 1; cat > \"\$f\" || { rm -f -- \"\$f\"; exit 1; }; bash \"\$f\" $remote_mode </dev/null; rc=\$?; rm -f -- \"\$f\"; exit \"\$rc\"" < "$0"
   REMOTE_UPDATE_STATUS=$?
-  if [[ "$HOST" != "$START_HOST" ]]; then
+  if [[ "$local_node" != true ]]; then
     ssh -q -p "$SSH_PORT" "$HOST" "if [[ -f $LOCAL_FILES/update.conf.uu-backup ]]; then mv -f $LOCAL_FILES/update.conf.uu-backup $LOCAL_FILES/update.conf; else rm -f $LOCAL_FILES/update.conf; fi"
   fi
   return "${REMOTE_UPDATE_STATUS:-0}"
@@ -1435,6 +1459,13 @@ UPDATE_HOST_ITSELF () {
 # step returns early while ERROR_CODE is set, so one failed container used to
 # turn every later VM update into a silent "apt-get update" only run, and a
 # non-root SSH VM left "sudo " behind for the following VMs.
+# EXIT_ON_ERROR=true ("Continue after errors: disabled"): once a target has
+# failed, the remaining targets are skipped. Package failures are handled
+# per target, so `set -e` alone never stopped the run.
+STOP_AFTER_FAILURE () {
+  [[ "$EXIT_ON_ERROR" != false && ( "$UPDATE_FAILURE" == true || "$SAFETY_FAILURE" == true ) ]]
+}
+
 RESET_TARGET_STATE () {
   ERROR_CODE="" ERROR_MSG="" ID="" UPDATE_USER=""
   CCONTAINER="" CVM="" SSH_CONNECTION="" UNIFI=""
@@ -1442,12 +1473,20 @@ RESET_TARGET_STATE () {
 }
 
 CONTAINER_UPDATE_START () {
-  # Get the list of containers
-  CONTAINERS=$(pct list | tail -n +2 | cut -f1 -d' ')
+  local pct_list
+  # A failed listing used to look like "no containers" and a successful run.
+  if ! pct_list=$(pct list); then
+    echo -e "❌${RD:-} Could not list the containers of this node${CL:-}\n"
+    UPDATE_FAILURE=true
+    return 0
+  fi
+  CONTAINERS=$(awk 'NR > 1 {print $1}' <<< "$pct_list")
   # Loop through the containers
   for CONTAINER in $CONTAINERS; do
     RESET_TARGET_STATE
-    if guest_id_matches "$EXCLUDED" "$CONTAINER"; then
+    if STOP_AFTER_FAILURE; then
+      echo -e "⏩${OR:-} Skipped LXC $CONTAINER: an earlier update failed and continuing after errors is disabled${CL:-}\n"
+    elif guest_id_matches "$EXCLUDED" "$CONTAINER"; then
       echo -e "⏩${BL:-} Skipped LXC $CONTAINER by the user${CL:-}\n\n"
     elif [[ "$ONLY" != "" ]] && ! guest_id_matches "$ONLY" "$CONTAINER"; then
       if [[ "$SINGLE_UPDATE" != true ]]; then echo -e "⏩${BL:-} Skipped LXC $CONTAINER by the user${CL:-}\n\n"; else continue; fi
@@ -1490,7 +1529,6 @@ CONTAINER_UPDATE_START () {
       fi
     fi
   done
-  rm -rf "$TEMP_STATE_DIR/temp"
 }
 
 # Container Update
@@ -1653,13 +1691,20 @@ UPDATE_CONTAINER () {
 
 # VM Update Start
 VM_UPDATE_START () {
-  # Get the list of VMs
-  VMS=$(qm list | tail -n +2 | cut -c -10)
+  local qm_list
+  if ! qm_list=$(qm list); then
+    echo -e "❌${RD:-} Could not list the VMs of this node${CL:-}\n"
+    UPDATE_FAILURE=true
+    return 0
+  fi
+  VMS=$(awk 'NR > 1 {print $1}' <<< "$qm_list")
   # Loop through the VMs
   for VM in $VMS; do
     RESET_TARGET_STATE
     PRE_OS=$(qm config "$VM" | grep ostype || true)
-    if guest_id_matches "$EXCLUDED" "$VM"; then
+    if STOP_AFTER_FAILURE; then
+      echo -e "⏩${OR:-} Skipped VM $VM: an earlier update failed and continuing after errors is disabled${CL:-}\n"
+    elif guest_id_matches "$EXCLUDED" "$VM"; then
       echo -e "⏩${BL:-} Skipped VM $VM by the user${CL:-}\n\n"
     elif [[ "$ONLY" != "" ]] && ! guest_id_matches "$ONLY" "$VM"; then
       if [[ "$SINGLE_UPDATE" != true ]]; then echo -e "⏩${BL:-} Skipped VM $VM by the user${CL:-}\n\n"; else continue; fi
@@ -2034,7 +2079,6 @@ fi
 
 # Logging
 OUTPUT_TO_FILE () {
-  echo 'EXEC_HOST="'"$HOSTNAME"'"' > "$TEMP_STATE_DIR/exec_host"
   if [[ "$RICM" != true ]]; then
     touch "$LOG_FILE"
     # Keep the terminal descriptors so CLEAN_LOGFILE can stop the tee.
@@ -2145,22 +2189,16 @@ UPDATE_MAIL_BODY() {
   fi
 }
 
-if [[ $EXIT_ON_ERROR == false ]]; then
-  ERROR_LOGGING
-else
-  set -e
-fi
+# The error log describes this run only; it used to be reset only with
+# EXIT_ON_ERROR=false, so a single failure was reported again by every later
+# successful run.
+ERROR_LOGGING
+[[ $EXIT_ON_ERROR == false ]] || set -e
 
 # Exit
 # shellcheck disable=SC2329
 EXIT () {
   EXIT_CODE=$?
-  if [[ -f "$TEMP_STATE_DIR/exec_host" ]]; then
-    EXEC_HOST=$(awk -F'"' '/^EXEC_HOST=/ {print $2}' "$TEMP_STATE_DIR/exec_host")
-  fi
-  if [[ "$WELCOME_SCREEN" == true && -n "$EXEC_HOST" ]]; then
-    scp "$LOCAL_FILES"/check-output "$EXEC_HOST":"$LOCAL_FILES"/check-output
-  fi
   if [[ "${INITIAL_INVENTORY_CLI:-false}" == true ]]; then
     rm -f -- "${TEMP_STATE_DIR:?}/var"
     rm -rf "$LOCAL_FILES"/update
@@ -2205,7 +2243,9 @@ EXIT () {
   sleep 3
   rm -f -- "${TEMP_STATE_DIR:?}/var"
   rm -rf "$LOCAL_FILES"/update
-  if [[ -f "$TEMP_STATE_DIR/exec_host" && "$HOSTNAME" != "$EXEC_HOST" ]]; then rm -rf "$LOCAL_FILES"; fi
+  # Older releases left an exec_host marker that made this trap delete the
+  # whole installation on a node that exited before rewriting it.
+  rm -f -- "$TEMP_STATE_DIR/exec_host"
 }
 trap EXIT EXIT
 

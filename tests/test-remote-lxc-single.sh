@@ -44,7 +44,8 @@ pct() {
 }
 source "$PWD/check-container.sh"
 CHECK_CONTAINER 200
-test -f "$LOCAL_FILES/temp/temp"
+# No shared fixed-name temp file (concurrent checks overwrote and deleted it).
+test ! -e "$LOCAL_FILES/temp/temp"
 grep -Fq '200 lxc pct true Debian GNU/Linux 12 (bookworm)' "$STATUS_MODEL_RECORD_FILE"
 HARNESS
 chmod 750 "$WORK_DIR/harness.sh"
@@ -52,8 +53,11 @@ chmod 750 "$WORK_DIR/harness.sh"
 
 # Match the shell parameter syntax literally in the source assertion.
 # shellcheck disable=SC2016
-grep -Fq 'mkdir -p -- "$LOCAL_FILES/temp"' "$ROOT_DIR/check-updates.sh"
-echo 'remote LXC single-check temp-directory regression: PASS'
+if grep -Fq 'temp/temp' "$ROOT_DIR/check-updates.sh" "$ROOT_DIR/update.sh"; then
+  echo 'a check still uses the shared temp/temp file' >&2
+  exit 1
+fi
+echo 'remote LXC single-check without shared temp files: PASS'
 
 # A guest hostname is display metadata. If pct exec hostname fails but the
 # Proxmox config is readable, the package check must still proceed.
