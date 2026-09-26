@@ -57,9 +57,19 @@ configured_debug_enabled() {
   [[ "${value,,}" == true || "${value,,}" == 1 || "${value,,}" == yes ]]
 }
 
+# LogFilterPatterns= exists since systemd 253. systemd-run validates
+# properties client-side, so passing it on Proxmox VE 8 (Debian 12 ships
+# systemd 252) would make every job fail with "Unknown assignment".
+systemd_supports_log_filters() {
+  local version
+  version=$(systemctl --version 2>/dev/null | awk 'NR == 1 {print $2; exit}')
+  [[ "$version" =~ ^[0-9]+ ]] && ((10#${BASH_REMATCH[0]} >= 253))
+}
+
 prepare_systemd_log_filters() {
   SYSTEMD_LOG_FILTER_ARGS=()
   configured_debug_enabled && return 0
+  systemd_supports_log_filters || return 0
 
   # Proxmox task clients write these messages directly to journald. They do
   # not travel through pct/qm stdout/stderr, so shell redirection cannot hide
