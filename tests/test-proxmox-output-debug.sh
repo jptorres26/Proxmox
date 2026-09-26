@@ -56,7 +56,7 @@ source "$WORK_DIR/wait-for-qga.sh"
 timeout() { shift; "$@"; }
 qm() { return 0; }
 # shellcheck disable=SC1007,SC2034 # sourced functions consume these test values.
-OR= GR= RD= CL=
+OR= GN= RD= CL=
 # shellcheck disable=SC2034 # consumed by the sourced readiness function.
 VM=971
 DEBUG=false

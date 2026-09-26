@@ -18,7 +18,8 @@ policy.
 
 An update is a mutating operation. It runs the selected package-manager or
 guest update path, applies configured snapshot/backup protection, and reports
-whether a reboot is needed. `REBOOT_IF_NEEDED` applies only here. Review the
+whether a reboot is needed. No host or guest is rebooted automatically;
+`REBOOT_IF_NEEDED` is reserved and currently has no effect. Review the
 target and job log before starting an update.
 
 Checks and updates are executed as server-side jobs where the CLI/Web UI

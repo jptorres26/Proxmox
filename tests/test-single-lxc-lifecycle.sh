@@ -26,7 +26,7 @@ PATH="$WORK_DIR:$PATH" bash -c '
   RECORDS="$1/records"; export RECORDS
   printf "status: stopped\n" > "$PCT_STATE"
   STOPPED=true; RUNNING=true; RDU=false; CHECK_FAILURE=0; STATUS_MODEL_NODE=node2
-  YL="" CL="" RD="" GN="" BL="" OS=debian
+  OR="" CL="" RD="" GN="" BL="" OS=debian
   RUN_PROXMOX_COMMAND() { "$@"; }
   RUN_PROXMOX_CAPTURE() { "$@"; }
   cluster_target_guest_name() { printf "fixture\n"; }

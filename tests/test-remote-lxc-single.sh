@@ -72,7 +72,7 @@ STATUS_MODEL_NODE=node2
 STATUS_MODEL_GUEST_NAME=tasmota
 INITIAL_INVENTORY=false
 STATUS_MODEL_RECORD_FILE="$PWD/hostname-records"
-YL='' CL=''
+OR='' CL=''
 SANITIZE_NUMBER() { tr -cd '0-9' <<< "$1"; }
 READ_APT_UPDATE_COUNTS() { SECURITY_APT_UPDATES=0; NORMAL_APT_UPDATES=0; }
 cluster_target_guest_name() { printf 'tasmota\n'; }
@@ -113,7 +113,7 @@ set -euo pipefail
 LOCAL_FILES="$PWD/remote-run"
 CONTAINER=240 RDU=false STATUS_MODEL_NODE=node2 STATUS_MODEL_GUEST_NAME=suse INITIAL_INVENTORY=false
 STATUS_MODEL_RECORD_FILE="$PWD/unsupported-records"
-YL='' CL=''
+OR='' CL=''
 SANITIZE_NUMBER() { tr -cd '0-9' <<< "$1"; }
 cluster_target_guest_name() { printf 'suse\n'; }
 STATUS_MODEL_RECORD() { printf '%s\n' "$*" >> "$STATUS_MODEL_RECORD_FILE"; }

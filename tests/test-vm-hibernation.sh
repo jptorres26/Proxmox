@@ -76,8 +76,11 @@ EXIT_ON_ERROR=false LOCAL_FILES="$PWD"
 QGA_CONFIG_ENABLED() { return 0; }
 CAPTURE_POST_UPDATE_STATUS() { :; }
 UPDATE_VM() { log "update $1"; }
+# A shutdown that finishes after the loop: VM_UPDATE_START must wait for it
+# (the job ended first and systemd stopped the remaining processes).
+RUN_PROXMOX_COMMAND() { [[ "$2" == shutdown ]] && sleep 0.3; log "proxmox $*"; }
 VM_UPDATE_START
-wait
+log "update loop returned"
 HARNESS
 (cd "$WORK_DIR" && COMMON="$WORK_DIR/common.sh" FUNCTIONS="$WORK_DIR/functions.sh" LOG="$WORK_DIR/update.log" \
   bash update.sh > "$WORK_DIR/update.out")
@@ -86,5 +89,7 @@ if grep -Eq '(start|update) 301' "$log"; then echo 'the update woke a hibernated
 grep -Fq 'Skipped VM 301 because it is hibernated' "$WORK_DIR/update.out"
 grep -Fxq 'proxmox qm start 302' "$log"
 grep -Fxq 'update 302' "$log"
+[[ "$(tail -n 2 "$log")" == $'proxmox qm shutdown 302\nupdate loop returned' ]] ||
+  { echo 'VM_UPDATE_START returned before its background shutdown finished' >&2; exit 1; }
 
 echo 'hibernated VM handling: PASS'
