@@ -23,7 +23,7 @@ esac
 target="${2:-}"
 [[ "$target" =~ $TARGET_RE ]] || { printf 'Invalid External target.\n' >&2; exit 64; }
 reference="${3:-}"
-[[ ${#reference} -le 200 && "$reference" != *$'\n'* && "$reference" != *$'\r'* ]] || {
+[[ ${#reference} -le 200 && "$reference" != *[[:cntrl:]]* ]] || {
   printf 'Invalid backup reference.\n' >&2
   exit 64
 }
@@ -32,6 +32,7 @@ if [[ "${1}" == verify ]]; then
   mkdir -p "$(dirname -- "$STATE_FILE")"
   chmod 0700 "$(dirname -- "$STATE_FILE")"
   python3 - "$STATE_FILE" "$target" "$reference" <<'PY'
+import fcntl
 import json
 import os
 import sys
@@ -39,6 +40,10 @@ import tempfile
 from datetime import datetime, timezone
 
 state_file, target, reference = sys.argv[1:]
+# Serialize verifications: two targets verified at once each rewrote the file
+# from the same old content, and one verification was lost.
+lock = open(state_file + ".lock", "a")
+fcntl.flock(lock, fcntl.LOCK_EX)
 try:
     with open(state_file, encoding="utf-8") as source:
         state = json.load(source)

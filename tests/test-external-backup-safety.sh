@@ -42,4 +42,26 @@ if run_check >/dev/null 2>&1; then
   exit 1
 fi
 
+# Concurrent verifications of different targets are all recorded.
+PARALLEL_STATE="$WORK_DIR/parallel.json"
+for number in $(seq 1 8); do
+  UU_EXTERNAL_BACKUP_STATE_FILE="$PARALLEL_STATE" "$ROOT_DIR/external-backup-safety.sh" \
+    verify "target-$number" "ref-$number" >/dev/null &
+done
+wait
+python3 - "$PARALLEL_STATE" <<'PY'
+import json
+import sys
+state = json.load(open(sys.argv[1], encoding="utf-8"))
+assert sorted(state) == [f"target-{number}" for number in range(1, 9)], sorted(state)
+PY
+
+# Control characters never reach the state file.
+for reference in $'tab\there' $'bell\a' $'line\nbreak'; do
+  if UU_EXTERNAL_BACKUP_STATE_FILE="$STATE" "$ROOT_DIR/external-backup-safety.sh" verify rocky-test "$reference" 2>/dev/null; then
+    echo "accepted a reference with a control character" >&2
+    exit 1
+  fi
+done
+
 echo "external backup safety tests: PASS"

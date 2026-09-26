@@ -170,7 +170,7 @@ def main():
             ], env=environment, stdout=log, stderr=subprocess.STDOUT)
         try:
             wait_for_server(url, server)
-            run_browser(url)
+            run_browser(url, etc / "update.conf", base / "schedules.json")
         except BaseException:
             print(log_path.read_text(encoding="utf-8"), file=sys.stderr)
             raise
@@ -184,7 +184,7 @@ def injected_markup(page):
     return page.evaluate("() => window.__uuInjected === 1 || !!document.querySelector('.uu-injected')")
 
 
-def run_browser(url):
+def run_browser(url, config_file, schedules_file):
     problems = []
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
@@ -196,6 +196,8 @@ def run_browser(url):
                                           dialog.dismiss()))
         try:
             exercise_pages(page, url)
+            exercise_settings(page, url, config_file)
+            exercise_scheduler(page, url, schedules_file)
         except Exception as error:
             problems.append(f"{type(error).__name__}: {error}")
         finally:
@@ -237,6 +239,56 @@ def exercise_pages(page, url):
     expect(page.locator("#dashboard")).to_be_visible()
     page.wait_for_load_state("networkidle")
     assert not injected_markup(page), "status data was rendered as HTML (XSS)"
+
+
+def exercise_settings(page, url, config_file):
+    """Saving keeps the editor usable and writes only the changed setting."""
+    page.goto(url + "/settings")
+    form = page.locator("#config-form")
+    message = page.locator("#config-message")
+    recipient = form.locator('input[data-key="EMAIL_USER"]')
+    expect(recipient).to_be_visible()
+    before = config_file.read_text(encoding="utf-8")
+
+    form.locator('button[type="submit"]').click()
+    expect(message).to_have_text("No changes to save.")
+    assert config_file.read_text(encoding="utf-8") == before, "an unchanged form rewrote update.conf"
+
+    recipient.fill("ops@example.org")
+    form.locator('button[type="submit"]').click()
+    expect(message).to_have_text("Configuration saved.")
+    expect(recipient).to_be_visible()
+    expect(recipient).to_have_value("ops@example.org")
+    after = config_file.read_text(encoding="utf-8")
+    changed = [(old, new) for old, new in zip(before.splitlines(), after.splitlines(), strict=True) if old != new]
+    assert changed == [('EMAIL_USER="root"', 'EMAIL_USER="ops@example.org"')], changed
+
+    recipient.fill("someone@example.org")
+    form.locator("#config-close").click()
+    expect(message).to_have_text("Changes discarded.")
+    expect(form.locator('input[data-key="EMAIL_USER"]')).to_have_value("ops@example.org")
+
+    recipient = form.locator('input[data-key="EMAIL_USER"]')
+    recipient.fill('root" DEBUG="true')
+    form.locator('button[type="submit"]').click()
+    expect(message).to_have_text("Configuration was not changed: EMAIL_USER contains unsupported characters.")
+    assert config_file.read_text(encoding="utf-8") == after
+
+
+def exercise_scheduler(page, url, schedules_file):
+    """A double submission creates one schedule, not two."""
+    page.goto(url + "/scheduler")
+    page.locator("#schedule-add").click()
+    form = page.locator("#schedule-form")
+    form.locator('input[name="name"]').fill("Nightly smoke check")
+    form.locator('input[name="days"][value="Mon"]').check()
+    form.locator('input[name="time"]').fill("03:15")
+    form.evaluate("form => { form.requestSubmit(); form.requestSubmit(); }")
+    expect(page.locator("#scheduler-list .scheduler-card")).to_have_count(1)
+    expect(page.locator("#scheduler-list")).to_contain_text("Nightly smoke check")
+    page.wait_for_load_state("networkidle")
+    stored = json.loads(schedules_file.read_text(encoding="utf-8"))["schedules"]
+    assert [item["name"] for item in stored] == ["Nightly smoke check"], stored
 
 
 if __name__ == "__main__":

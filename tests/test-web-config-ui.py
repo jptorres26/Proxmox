@@ -173,7 +173,11 @@ assert "SSH port default: 22." in page
 assert "config-field select" in page
 assert "Legacy value: ${current}" in page
 assert "form.dataset.initialConfig=JSON.stringify(values)" in page
-assert "if(value!==previous)next[input.dataset.key]=value" in page
+assert "if(value!==previous)next[key]=value" in page
+# Keys absent from update.conf are rendered with defaults; they must compare
+# equal to those defaults instead of being posted on every save.
+assert "previous=raw===true" in page and "previous=raw||'stop'" in page
+assert "setConfigOpen" not in page  # the toggle button it drove no longer exists
 assert "reboot-required-badge" in page
 assert "Reboot required" in page
 assert ".job-download { display:inline-flex" in page
@@ -278,7 +282,7 @@ assert "summary.style.setProperty('display',visible?'none':'grid','important')" 
 
 # External runtime rows expose status/actions only; configuration management
 # remains in the separate management list below.
-runtime_row = page.split("function targetRow(t)", 1)[1].split("document.getElementById('config-open')", 1)[0]
+runtime_row = page.split("function targetRow(t)", 1)[1].split("document.getElementById('internal-ssh-open')", 1)[0]
 assert "class=\"edit-target\"" not in runtime_row
 assert "class=\"remove-target\"" not in runtime_row
 assert "data-edit=\"${esc(t.id)}\"" in page

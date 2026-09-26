@@ -126,7 +126,7 @@ UPDATER_VERSION_LOCK = threading.Lock()
 PUBLIC_VERSION_TTL = 6 * 60 * 60   # re-check a successful public version result
 PUBLIC_VERSION_RETRY = 60          # retry an unavailable result
 JOB_RE = re.compile(r"^ultimate-updater-(?:update|check)-[A-Za-z0-9_.-]+$")
-HOST_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
+HOST_RE = re.compile(r"^[A-Za-z0-9:][A-Za-z0-9_.:-]{0,252}$")  # never an option ("-...")
 USER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 INTERNAL_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]+$")
 SCHEDULER_ID_RE = re.compile(r"^[a-f0-9]{12}$")
@@ -135,8 +135,19 @@ SCHEDULER_TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 SCHEDULER_DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 SCHEDULER_TYPES = {"check-all", "check-selected", "update-all", "update-selected"}
 SCHEDULER_SCHEMA_VERSION = 2
-SCHEDULER_TARGET_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
+SCHEDULER_TARGET_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,159}$")  # passed to the CLI as an argument
 SCHEDULER_LEGACY_DAYS = dict(zip(("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"), SCHEDULER_DAYS, strict=True))
+
+
+# Serializes schedule changes: each one reads schedules.json, changes systemd
+# units, and writes the file back; two concurrent requests lost an entry and
+# left its timer running without a way to manage it.
+SCHEDULER_LOCK = threading.RLock()
+
+
+def scheduler_job_source(schedule_id):
+    """Job source recorded for runs of one schedule (see scheduler_last_run)."""
+    return f"scheduler:{schedule_id}"
 
 
 def scheduler_unit_name(schedule_id):
@@ -290,7 +301,7 @@ def scheduler_unit_files(schedule, unit_dir, cli):
     action = schedule["type"]
     commands = scheduler_commands(schedule, cli)
     service_lines = ["[Unit]", f"Description=Ultimate Updater scheduled {action}", "", "[Service]",
-                     "Type=oneshot", "Environment=UU_JOB_SOURCE=scheduler"]
+                     "Type=oneshot", f"Environment=UU_JOB_SOURCE={scheduler_job_source(schedule['id'])}"]
     service_lines.extend(f"ExecStart={shlex.join(command)}" for command in commands)
     service_lines.append("")
     service_text = "\n".join(service_lines)
@@ -299,6 +310,29 @@ def scheduler_unit_files(schedule, unit_dir, cli):
                               f"OnCalendar={scheduler_calendar(schedule)}", "Persistent=false",
                               f"Unit={unit}.service", "", "[Install]", "WantedBy=timers.target", ""))
     return unit, service, timer, service_text, timer_text
+
+
+def scheduler_refresh_units(schedules_file, unit_dir, cli):
+    """Bring existing schedule service units up to date after an upgrade.
+
+    Only service files that exist and differ are rewritten (timers are left
+    alone); systemd is reloaded once if anything changed.
+    """
+    changed = []
+    with SCHEDULER_LOCK:
+        for schedule in scheduler_load(schedules_file):
+            _unit, service, _timer, service_text, _timer_text = scheduler_unit_files(schedule, unit_dir, cli)
+            if not service.is_file() or service.read_text(encoding="utf-8") == service_text:
+                continue
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=service.parent, delete=False) as temporary:
+                temporary.write(service_text)
+                temporary_path = Path(temporary.name)
+            os.chmod(temporary_path, 0o644)
+            os.replace(temporary_path, service)
+            changed.append(service.name)
+    if changed:
+        subprocess.run(["systemctl", "daemon-reload"], capture_output=True, timeout=30, check=True)
+    return changed
 
 
 def scheduler_cli_target(target):
@@ -407,6 +441,27 @@ CONFIG_STRING_KEYS = {
 }
 CONFIG_ENUMS = {"BACKUP_MODE": {"stop", "suspend", "snapshot"}}
 CONFIG_KEYS = CONFIG_BOOLEAN_KEYS | CONFIG_INTEGER_KEYS | CONFIG_STRING_KEYS
+# Every reader parses update.conf with awk -F'"' '/^KEY=/ {print $2}', and
+# several values end up unquoted in `bash -c` command lines on the host or in
+# guests. No value may contain a double quote, backslash, or control
+# character, and none may start with "-" (option injection).
+_FILTER_LIST_RE = re.compile(r"[A-Za-z0-9_+.,;:| -]*")
+_ENV_ASSIGNMENT = r"[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9_./:@%+,=-]*"
+CONFIG_STRING_PATTERNS = {
+    # VMIDs, ranges, and Proxmox tags.
+    "ONLY_UPDATE_CHECK": _FILTER_LIST_RE, "EXCLUDE_UPDATE_CHECK": _FILTER_LIST_RE,
+    "ONLY": _FILTER_LIST_RE, "EXCLUDE": _FILTER_LIST_RE,
+    "BACKUP_STORAGE": re.compile(r"[A-Za-z0-9_.-]*"),
+    "EMAIL_USER": re.compile(r"(?:[A-Za-z0-9_.%+@][A-Za-z0-9_.%+@, -]*)?"),
+    # "$USER" is expanded to the running user by the scripts.
+    "EMAIL_SENDER": re.compile(r"(?:\$USER|[A-Za-z0-9_.%+@][A-Za-z0-9_.%+@<> -]*)?"),
+    "EXE_FOR_INTERNET_CHECK": re.compile(r"(?:[A-Za-z0-9_/][A-Za-z0-9_./-]*)?"),
+    "URL_FOR_INTERNET_CHECK": re.compile(r"(?:[A-Za-z0-9:][A-Za-z0-9.:-]*)?"),
+    "PACMAN_ENVIRONMENT": re.compile(rf"(?:{_ENV_ASSIGNMENT}(?: +{_ENV_ASSIGNMENT})*)?"),
+    "COMPOSE_PATH": re.compile(r"(?:/[A-Za-z0-9_.@+ /-]*)?"),
+}
+if set(CONFIG_STRING_PATTERNS) != CONFIG_STRING_KEYS - set(CONFIG_ENUMS):
+    raise RuntimeError("every free-text configuration key needs a value pattern")
 
 # Every schema key has an explicit audit classification.  Internal and
 # deprecated keys are intentionally not part of CONFIG_KEYS and therefore
@@ -975,7 +1030,7 @@ body:has(#login-screen.open) .nav-scrim { display:none !important; }
     document.addEventListener('click',event=>{const trigger=event.target.closest('.help-trigger');if(trigger){const control=trigger.closest('.help-control'),open=control.classList.contains('open');closeHelpControls(control);control.classList.toggle('open',!open);trigger.setAttribute('aria-expanded',String(!open));return}if(!event.target.closest('.help-control'))closeHelpControls()});
     document.addEventListener('keydown',event=>{if(event.key!=='Escape')return;const open=document.querySelector('.help-control.open');closeHelpControls();if(open)open.querySelector('.help-trigger')?.focus()});
     let managedTargets=[], editingTarget=null, internalSshTargets=[], internalSshAvailable=[];
-    function setConfigOpen(open){const form=document.getElementById('config-form'),panel=document.getElementById('config-panel'),button=document.getElementById('config-open');form.classList.toggle('open',open);document.querySelector('#settings-page .management-grid').classList.toggle('config-open',open);button.textContent=open?'Close editor':'Open editor';button.setAttribute('aria-expanded',String(open));if(open)loadConfig()}
+    function guardSubmit(form){const handler=form?.onsubmit;if(!handler||handler.submitGuard)return;const guarded=async event=>{event.preventDefault();if(form.dataset.submitting==='true')return;form.dataset.submitting='true';const buttons=[...form.querySelectorAll('button[type="submit"]')];buttons.forEach(button=>{button.disabled=true});try{await handler.call(form,event)}finally{delete form.dataset.submitting;buttons.forEach(button=>{button.disabled=false})}};guarded.submitGuard=true;form.onsubmit=guarded}
     function managementMessage(id,message,error=false){const n=document.getElementById(id);n.textContent=message||'';n.className=`management-message${error?' error':''}`}
     function configField(key,values,compact=false){const label=document.createElement('label');label.className=`config-field${configBooleanKeys.includes(key)?' boolean-field':''}${configNumberKeys.includes(key)?' numeric-field':''}${compact?' matrix-control':''}`;if(compact)label.title=configLabels[key]||key;const caption=document.createElement('span');caption.className='field-label';caption.textContent=configLabels[key]||key;if(!compact&&fieldHelpContent[key])caption.appendChild(createHelpControl(configLabels[key]||key,fieldHelpContent[key]));const input=key==='BACKUP_MODE'?document.createElement('select'):document.createElement('input');input.name=key;input.dataset.key=key;if(configBooleanKeys.includes(key)){input.type='checkbox';input.checked=values[key]===true;label.append(input,caption)}else if(key==='BACKUP_MODE'){const current=values[key]||'';['stop','suspend','snapshot'].forEach(option=>{const item=document.createElement('option');item.value=option;item.textContent=option;input.appendChild(item)});if(current&&!['stop','suspend','snapshot'].includes(current)){const item=document.createElement('option');item.value=current;item.textContent=`Legacy value: ${current}`;input.appendChild(item)}input.value=current||'stop';label.append(caption,input)}else{input.type=configNumberKeys.includes(key)?'number':'text';input.value=values[key]??'';if(input.type==='number'){input.min=key==='SSH_PORT'||key==='KEEP_SNAPSHOTS'?'1':'0';if(key==='SSH_PORT')input.max='65535'}label.append(caption,input);if(configNumberKeys.includes(key)){const unit=document.createElement('span');unit.className='field-unit';unit.textContent=key==='KEEP_SNAPSHOTS'?'snapshots':key==='SSH_PORT'?'TCP port':'seconds';label.append(unit)}else if(key==='BACKUP_STORAGE'){const unit=document.createElement('span');unit.className='field-unit';unit.textContent='Proxmox storage ID, e.g. pbs';label.append(unit)}}return label}
     function configMatrix(groupData,values){const wrap=document.createElement('div');wrap.className='check-update-layout';const matrix=document.createElement('div');matrix.className='check-update-matrix';matrix.setAttribute('role','table');const header=document.createElement('div');header.className='matrix-row';const blank=document.createElement('span');blank.className='matrix-label';const checkHead=document.createElement('span');checkHead.className='matrix-cell matrix-head';checkHead.textContent='Check';const updateHead=document.createElement('span');updateHead.className='matrix-cell matrix-head';updateHead.textContent='Update';header.append(blank,checkHead,updateHead);matrix.appendChild(header);groupData.matrix.forEach(row=>{const item=document.createElement('div');item.className='matrix-row';const label=document.createElement('span');label.className='matrix-label';label.textContent=row.label;const check=document.createElement('span');check.className='matrix-cell';check.appendChild(configField(row.check,values,true));const update=document.createElement('span');update.className='matrix-cell';if(row.update)update.appendChild(configField(row.update,values,true));else{const dash=document.createElement('span');dash.className='matrix-empty';dash.textContent='—';update.appendChild(dash)}item.append(label,check,update);matrix.appendChild(item)});wrap.appendChild(matrix);if(groupData.extras){const extras=document.createElement('div');extras.className='matrix-extras';groupData.extras.forEach(key=>{const field=configField(key,values);if(configNumberKeys.includes(key)){const row=document.createElement('div');row.className='matrix-extra-row';const caption=field.querySelector('.field-label');caption.className='delay-label';const control=document.createElement('span');control.className='delay-control';control.append(field.querySelector('input'),field.querySelector('.field-unit'));row.append(caption,control);extras.appendChild(row)}else extras.appendChild(field)});wrap.appendChild(extras)}return wrap}
@@ -983,7 +1038,7 @@ body:has(#login-screen.open) .nav-scrim { display:none !important; }
     function renderFilterPreview(data,scope){const box=document.getElementById(`${scope}-filter-preview`);if(!box)return;if(!data?.available){box.innerHTML='<div class="filter-preview-note">Target preview unavailable until the initial inventory has completed.</div>';return}const p=data.preview||{},included=p.included||[],excluded=p.excluded||[],onlyUnknown=p.only_unknown||[],excludeUnknown=p.exclude_unknown||[],configured=p.only_configured||'',matches=Number.isInteger(p.only_matches)?p.only_matches:0,active=Boolean(p.only_active);let summary=scope==='update'?`${included.length} targets selected for update`:`${included.length} targets selected for check`;const effective=active?`Only configured: ${esc(configured)} · matches: ${matches} · effective selection: only matching targets`:(configured?`Only tag "${esc(configured)}" has no eligible matches. Using all eligible targets.`:'Effective selection: all eligible targets');const detail=(title,items,klass)=>items.length?`<section><h4>${title}</h4><div class="filter-preview-list">${items.map(item=>`<div class="${klass||''}">${klass==='excluded'?'✕':'✓'} ${esc(item.label)}</div>`).join('')}</div></section>`:'';const unknownDetail=(title,items)=>items.length?`<section><h4>${title}</h4><div class="filter-preview-list"><div class="unknown">⚠ ${items.map(item=>`<span>${esc(item)}</span>`).join(', ')}</div></div></section>`:'';box.innerHTML=`<button type="button" class="filter-preview-toggle" aria-expanded="false"><span class="filter-preview-chevron" aria-hidden="true"></span><span>✓ ${summary}</span></button><div class="filter-preview-details"><section><h4>Selection</h4><div class="filter-preview-note">${effective} Exclude is always applied afterwards.</div></section>${detail(active?'Selected':'Included',included,'')}${detail('Excluded targets',excluded,'excluded')}${unknownDetail('Only tag not currently found',onlyUnknown)}${unknownDetail('Exclude tag not currently found',excludeUnknown)}</div>`;const toggle=box.querySelector('.filter-preview-toggle');toggle.onclick=()=>{const open=box.classList.toggle('open');toggle.setAttribute('aria-expanded',String(open))}}
     async function loadFilterPreview(form,scope){const keys=scope==='update'?['ONLY','EXCLUDE']:['ONLY_UPDATE_CHECK','EXCLUDE_UPDATE_CHECK'],only=form?.querySelector(`[data-key="${keys[0]}"]`)?.value||'',exclude=form?.querySelector(`[data-key="${keys[1]}"]`)?.value||'',box=document.getElementById(`${scope}-filter-preview`);if(box)box.innerHTML='<div class="filter-preview-note">Loading target preview…</div>';try{const query=new URLSearchParams({scope,only,exclude});const data=await api(`/api/config-preview?${query.toString()}`);renderFilterPreview(data,scope)}catch(error){if(box)box.innerHTML='<div class="filter-preview-note">Target preview is currently unavailable.</div>'}}
     function scheduleFilterPreview(form,scope){clearTimeout(filterPreviewTimers[scope]);filterPreviewTimers[scope]=setTimeout(()=>loadFilterPreview(form,scope),250)}
-    function buildConfigForm(values){const form=document.getElementById('config-form');form.innerHTML='';form.dataset.initialConfig=JSON.stringify(values);for(const groupData of configGroups){const wide=groupData.title==='Host'||groupData.title==='Target filters'||groupData.filterGroups;const group=document.createElement('section');group.className=`settings-group${wide?' settings-group-wide':''}`;const heading=document.createElement('div');heading.className='settings-heading';const title=document.createElement('h3');title.textContent=groupData.title;heading.appendChild(title);if(helpContent[groupData.title])heading.appendChild(createHelpControl(groupData.title,helpContent[groupData.title]));group.appendChild(heading);const hint=document.createElement('p');hint.textContent=groupData.hint;group.appendChild(hint);if(groupData.filterGroups){const scopes=document.createElement('div');scopes.className='filter-scopes';groupData.filterGroups.forEach(scopeData=>{const scope=document.createElement('section');scope.className='filter-scope';const scopeTitle=document.createElement('h4');scopeTitle.textContent=scopeData.title;scope.appendChild(scopeTitle);const fields=document.createElement('div');fields.className='config-fields';scopeData.keys.forEach(key=>fields.appendChild(configField(key,values)));scope.appendChild(fields);const preview=document.createElement('div');preview.id=`${scopeData.preview}-filter-preview`;preview.className='filter-preview';scope.appendChild(preview);scopes.appendChild(scope)});group.appendChild(scopes)}else if(groupData.matrix){group.appendChild(configMatrix(groupData,values))}else if(groupData.columns){const columns=document.createElement('div');columns.className='settings-columns';groupData.columns.forEach(keys=>{const column=document.createElement('div');column.className='settings-column';keys.forEach(key=>column.appendChild(configField(key,values)));columns.appendChild(column)});group.appendChild(columns)}else{const fields=document.createElement('div');fields.className='config-fields';groupData.keys.forEach(key=>fields.appendChild(configField(key,values)));group.appendChild(fields)}form.appendChild(group)}const actions=document.createElement('div');actions.className='config-actions';actions.innerHTML='<button type="submit" class="primary">Save settings</button><button type="button" id="config-close">Cancel</button>';form.appendChild(actions);form.querySelectorAll('[data-key="ONLY_UPDATE_CHECK"],[data-key="EXCLUDE_UPDATE_CHECK"]').forEach(input=>input.addEventListener('input',()=>scheduleFilterPreview(form,'check')));form.querySelectorAll('[data-key="ONLY"],[data-key="EXCLUDE"]').forEach(input=>input.addEventListener('input',()=>scheduleFilterPreview(form,'update')));loadFilterPreview(form,'check');loadFilterPreview(form,'update');form.onsubmit=async e=>{e.preventDefault();const initial=JSON.parse(form.dataset.initialConfig||'{}'),next={};for(const input of form.querySelectorAll('[data-key]')){const value=input.type==='checkbox'?input.checked:input.type==='number'?Number(input.value):input.value,previous=initial[input.dataset.key]??'';if(value!==previous)next[input.dataset.key]=value}if(!Object.keys(next).length){setConfigOpen(false);return}try{const d=await api('/api/config',{method:'POST',body:JSON.stringify({values:next})});buildConfigForm(d.config);setConfigOpen(false);managementMessage('config-message','Configuration saved.')}catch(error){managementMessage('config-message',error.message,true)}};document.getElementById('config-close').onclick=()=>setConfigOpen(false)}
+    function buildConfigForm(values){const form=document.getElementById('config-form');form.innerHTML='';form.dataset.initialConfig=JSON.stringify(values);for(const groupData of configGroups){const wide=groupData.title==='Host'||groupData.title==='Target filters'||groupData.filterGroups;const group=document.createElement('section');group.className=`settings-group${wide?' settings-group-wide':''}`;const heading=document.createElement('div');heading.className='settings-heading';const title=document.createElement('h3');title.textContent=groupData.title;heading.appendChild(title);if(helpContent[groupData.title])heading.appendChild(createHelpControl(groupData.title,helpContent[groupData.title]));group.appendChild(heading);const hint=document.createElement('p');hint.textContent=groupData.hint;group.appendChild(hint);if(groupData.filterGroups){const scopes=document.createElement('div');scopes.className='filter-scopes';groupData.filterGroups.forEach(scopeData=>{const scope=document.createElement('section');scope.className='filter-scope';const scopeTitle=document.createElement('h4');scopeTitle.textContent=scopeData.title;scope.appendChild(scopeTitle);const fields=document.createElement('div');fields.className='config-fields';scopeData.keys.forEach(key=>fields.appendChild(configField(key,values)));scope.appendChild(fields);const preview=document.createElement('div');preview.id=`${scopeData.preview}-filter-preview`;preview.className='filter-preview';scope.appendChild(preview);scopes.appendChild(scope)});group.appendChild(scopes)}else if(groupData.matrix){group.appendChild(configMatrix(groupData,values))}else if(groupData.columns){const columns=document.createElement('div');columns.className='settings-columns';groupData.columns.forEach(keys=>{const column=document.createElement('div');column.className='settings-column';keys.forEach(key=>column.appendChild(configField(key,values)));columns.appendChild(column)});group.appendChild(columns)}else{const fields=document.createElement('div');fields.className='config-fields';groupData.keys.forEach(key=>fields.appendChild(configField(key,values)));group.appendChild(fields)}form.appendChild(group)}const actions=document.createElement('div');actions.className='config-actions';actions.innerHTML='<button type="submit" class="primary">Save settings</button><button type="button" id="config-close">Cancel</button>';form.appendChild(actions);form.querySelectorAll('[data-key="ONLY_UPDATE_CHECK"],[data-key="EXCLUDE_UPDATE_CHECK"]').forEach(input=>input.addEventListener('input',()=>scheduleFilterPreview(form,'check')));form.querySelectorAll('[data-key="ONLY"],[data-key="EXCLUDE"]').forEach(input=>input.addEventListener('input',()=>scheduleFilterPreview(form,'update')));loadFilterPreview(form,'check');loadFilterPreview(form,'update');form.onsubmit=async e=>{e.preventDefault();const initial=JSON.parse(form.dataset.initialConfig||'{}'),next={};for(const input of form.querySelectorAll('[data-key]')){const key=input.dataset.key,raw=initial[key];let value,previous;if(input.type==='checkbox'){value=input.checked;previous=raw===true}else if(input.type==='number'){previous=raw??null;value=input.value.trim()===''?null:Number(input.value);if(value===null&&previous===null)continue;if(!Number.isInteger(value)){managementMessage('config-message',`${configLabels[key]||key} needs a whole number.`,true);input.focus();return}}else if(key==='BACKUP_MODE'){value=input.value;previous=raw||'stop'}else{value=input.value;previous=raw??''}if(value!==previous)next[key]=value}if(!Object.keys(next).length){managementMessage('config-message','No changes to save.');return}const submit=form.querySelector('button[type="submit"]');if(submit)submit.disabled=true;try{const d=await api('/api/config',{method:'POST',body:JSON.stringify({values:next})});buildConfigForm(d.config);managementMessage('config-message','Configuration saved.')}catch(error){managementMessage('config-message',error.message,true)}finally{if(submit)submit.disabled=false}};document.getElementById('config-close').onclick=()=>{buildConfigForm(JSON.parse(form.dataset.initialConfig||'{}'));managementMessage('config-message','Changes discarded.')}}
     const buildConfigFormBase=buildConfigForm;buildConfigForm=function(values){buildConfigFormBase(values);const form=document.getElementById('config-form'),input=form?.querySelector('[data-key="EXIT_ON_ERROR"]');if(!input)return;input.checked=values.EXIT_ON_ERROR!==true;const submit=form.onsubmit;form.onsubmit=async event=>{input.checked=!input.checked;await submit.call(form,event);if(input.isConnected)input.checked=!input.checked}};
     async function loadConfig(){try{const d=await api('/api/config');buildConfigForm(d.config)}catch(error){managementMessage('config-message',error.message,true)}}
     function renderManagedTargets(){const box=document.getElementById('managed-targets');if(!managedTargets.length){box.innerHTML='<div class="empty">No external systems configured.</div>';return}box.innerHTML=managedTargets.map(t=>`<div class="managed-target"><div><strong>${esc(t.id)}</strong><small>${esc(t.user)}@${esc(t.host)}:${esc(t.port)} · SSH</small></div><div class="managed-actions"><button data-edit="${esc(t.id)}">Edit</button><button data-test="${esc(t.id)}">Test connection</button><button data-remove="${esc(t.id)}">Remove</button></div></div>`).join('');box.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>openTargetModal(managedTargets.find(t=>t.id===b.dataset.edit)));box.querySelectorAll('[data-test]').forEach(b=>b.onclick=()=>testTarget(b.dataset.test,null,b));box.querySelectorAll('[data-remove]').forEach(b=>b.onclick=()=>removeTarget(b.dataset.remove))}
@@ -1016,7 +1071,7 @@ body:has(#login-screen.open) .nav-scrim { display:none !important; }
     async function testTarget(id,payload=null,button=null){const messageId=payload?'target-modal-message':'target-message';const original=button?.textContent;if(button){button.dataset.testing='true';button.disabled=true;button.textContent='Testing…'}managementMessage(messageId,'Testing connection…');try{const d=await api(`/api/targets/${encodeURIComponent(id)}/test`,{method:'POST',body:JSON.stringify(payload||{})});const t=d.target||{};managementMessage(messageId,`Connection successful · ${t.os||'OS unknown'}`)}catch(error){managementMessage(messageId,error.message||'SSH connection failed.',true)}finally{if(button){button.textContent=original||'Test connection';delete button.dataset.testing;updateExternalTestAvailability()}}}
     function testExternalForm(event){event.preventDefault();const form=document.getElementById('target-modal-form'),button=event.currentTarget;if(!form.checkValidity()){form.reportValidity();updateExternalTestAvailability();return}const payload=externalFormPayload(form);testTarget(payload.id,payload,button)}
     function targetRow(t){const rebootField=t.type==='lxc'?'':`<div class="target-field"><span class="target-label">Reboot</span><strong class="${t.reboot_required===true?'reboot-required':''}">${t.reboot_required===true?'Yes':t.reboot_required===false?'No':'Unknown'}</strong></div>`;const row=document.createElement('div');row.className=`target-row ${securitySplitSupported(t)?'split-row':'total-only-row'}`;if(t.type==='lxc')row.classList.add('lxc-row');row.innerHTML=`<div><div class="target-name">${guestIdentity(t)}</div><div class="target-id">${esc(t.type)} · ${esc(t.transport)}</div></div><div class="target-field target-status">${statusTone(t)}</div>${securitySplitSupported(t)?`<div class="target-field"><span class="target-label">Normal</span><strong>${updateValue(knownNormalUpdates(t))}</strong></div><div class="target-field"><span class="target-label">Security</span><strong>${updateValue(knownSecurityUpdates(t))}</strong></div>`:`<div class="target-field"><span class="target-label">Updates</span><strong>${updateValue(knownTotalOnlyUpdates(t))}</strong></div>`}${rebootField}<div class="target-field row-os"><span class="target-label">OS</span><strong>${esc(osOverviewName(t))}</strong></div><div class="target-field row-last-check"><span class="target-label">Last check</span><strong>${esc(date(t.last_check))}</strong></div><div class="row-actions"><button class="check">Check</button><button class="primary update">${running(t.id)?'Running':'Update'}</button></div>`;row.addEventListener('click',e=>{if(!e.target.closest('button'))renderDetails(t)});row.querySelector('.check').addEventListener('click',e=>{e.stopPropagation();action(`/api/check/${encodeURIComponent(t.id)}`)});const update=row.querySelector('.update');update.disabled=running(t.id)||!TARGET_UPDATEABLE(t);update.addEventListener('click',e=>{e.stopPropagation();action(`/api/update/${encodeURIComponent(t.id)}`,true)});return row}
-    const configOpen=document.getElementById('config-open');if(configOpen)configOpen.onclick=()=>setConfigOpen(!document.getElementById('config-form').classList.contains('open'));document.getElementById('internal-ssh-open').onclick=()=>setInternalSshView(true);document.getElementById('internal-ssh-back').onclick=()=>setInternalSshView(false);document.getElementById('target-add').onclick=()=>openTargetModal();document.getElementById('target-modal-cancel').onclick=closeTargetModal;document.getElementById('target-modal-test').addEventListener('click',testExternalForm);document.getElementById('target-modal-form').addEventListener('input',updateExternalTestAvailability);document.getElementById('target-modal-form').onsubmit=saveTarget;document.getElementById('external-settings-close').onclick=closeExternalSettings;document.getElementById('external-settings-form').onsubmit=saveExternalSettings;
+    document.getElementById('internal-ssh-open').onclick=()=>setInternalSshView(true);document.getElementById('internal-ssh-back').onclick=()=>setInternalSshView(false);document.getElementById('target-add').onclick=()=>openTargetModal();document.getElementById('target-modal-cancel').onclick=closeTargetModal;document.getElementById('target-modal-test').addEventListener('click',testExternalForm);document.getElementById('target-modal-form').addEventListener('input',updateExternalTestAvailability);document.getElementById('target-modal-form').onsubmit=saveTarget;document.getElementById('external-settings-close').onclick=closeExternalSettings;document.getElementById('external-settings-form').onsubmit=saveExternalSettings;['internal-ssh-form','target-modal-form','external-settings-form'].forEach(id=>guardSubmit(document.getElementById(id)));
     async function bootstrap(){try{await ensureSession();showDashboard();applyPageRoute();await Promise.all([loadStatus(),loadJobs(),loadTargets()]);scheduleUpdaterVersionCheck()}catch(error){if(csrfToken)notice(error.message,true)}}
     const aggregateField=field=>{const targets=Array.isArray(currentStatus?.targets)?currentStatus.targets:[],values=targets.map(t=>t?.[field]).filter(Number.isInteger);return values.length?values.reduce((sum,value)=>sum+value,0):null};
     const aggregateTotalOnly=()=>{const targets=Array.isArray(currentStatus?.targets)?currentStatus.targets:[],values=targets.map(knownTotalOnlyUpdates).filter(Number.isInteger);return values.length?values.reduce((sum,value)=>sum+value,0):null};
@@ -1083,13 +1138,13 @@ body:has(#login-screen.open) .nav-scrim { display:none !important; }
   const targetLabel=item=>`${item.name||item.id} · ${item.type_label||item.type}`;
   const renderTargetTable=()=>{const query=document.getElementById('target-search').value.trim().toLowerCase(),body=document.getElementById('schedule-target-body');const visible=schedulerTargets.filter(item=>[item.id,item.node,item.name,item.type_label,item.status].join(' ').toLowerCase().includes(query));body.replaceChildren();visible.forEach(item=>{const row=document.createElement('tr');row.innerHTML=`<td><input type="checkbox" data-target-id="${esc(item.id)}" ${selectedTargets.has(item.id)?'checked':''} aria-label="Select ${esc(targetLabel(item))}"></td><td>${esc(item.id.replace(/^host:/,''))}</td><td>${esc(item.node)}</td><td>${esc(item.status)}</td><td>${esc(item.name)}</td><td>${esc(item.type_label)}</td>`;body.appendChild(row)});document.getElementById('schedule-selected').textContent=`Selected (${selectedTargets.size})`;const known=new Set(schedulerTargets.map(item=>item.id)),missing=[...selectedTargets].filter(id=>!known.has(id)),missingBox=document.getElementById('schedule-missing');missingBox.hidden=!missing.length;missingBox.textContent=missing.length?`Missing targets: ${missing.join(', ')}`:''};
   const loadSchedulerTargets=async()=>{try{const data=await scheduleApi('/api/scheduler-targets');schedulerTargets=Array.isArray(data.targets)?data.targets:[];renderTargetTable()}catch(error){showScheduleMessage(error.message,true)}};
-  const renderSchedules=data=>{schedules=Array.isArray(data.schedules)?data.schedules:[];const enabled=schedules.filter(item=>item.enabled);document.getElementById('scheduler-state').textContent=enabled.length?'Enabled':'Disabled';document.getElementById('scheduler-count').textContent=enabled.length;const next=enabled.filter(item=>item.next_run).sort((a,b)=>a.next_run.localeCompare(b.next_run))[0];document.getElementById('scheduler-next').textContent=next?formatScheduleTime(next.next_run):'—';list.replaceChildren();empty.hidden=schedules.length>0;schedules.forEach(item=>{const card=document.createElement('article');card.className='scheduler-card';card.innerHTML=`<div class="scheduler-card-main"><div class="scheduler-card-title"><strong>${esc(item.name)}</strong><span class="schedule-state ${item.enabled?'enabled':'disabled'}">${item.enabled?'Enabled':'Disabled'}</span></div><span class="hint">${item.type==='check-all'?'Check all systems':item.type==='check-selected'?'Check selected':item.type==='update-all'?'Update all systems':'Update selected'} · ${item.type.endsWith('selected')?`${item.targets.length} targets · `:''}${scheduleLabel(item)}</span><small>Next run: ${item.enabled?formatScheduleTime(item.next_run):'Disabled'}<br>Last run: ${esc(resultLabel(item))}</small></div><div class="scheduler-card-actions"><button type="button" data-schedule-action="edit" data-schedule-id="${item.id}">Edit</button><button type="button" data-schedule-action="run" data-schedule-id="${item.id}">Run now</button><button type="button" data-schedule-action="toggle" data-schedule-id="${item.id}">${item.enabled?'Disable':'Enable'}</button><button type="button" data-schedule-action="delete" data-schedule-id="${item.id}">Delete</button></div>`;list.appendChild(card)})};
+  const renderSchedules=data=>{schedules=Array.isArray(data.schedules)?data.schedules:[];const enabled=schedules.filter(item=>item.enabled);document.getElementById('scheduler-state').textContent=enabled.length?'Enabled':'Disabled';document.getElementById('scheduler-count').textContent=enabled.length;const next=enabled.filter(item=>item.next_run).sort((a,b)=>a.next_run.localeCompare(b.next_run))[0];document.getElementById('scheduler-next').textContent=next?formatScheduleTime(next.next_run):'—';list.replaceChildren();empty.hidden=schedules.length>0;schedules.forEach(item=>{const card=document.createElement('article');card.className='scheduler-card';card.innerHTML=`<div class="scheduler-card-main"><div class="scheduler-card-title"><strong>${esc(item.name)}</strong><span class="schedule-state ${item.enabled?'enabled':'disabled'}">${item.enabled?'Enabled':'Disabled'}</span></div><span class="hint">${item.type==='check-all'?'Check all systems':item.type==='check-selected'?'Check selected':item.type==='update-all'?'Update all systems':'Update selected'} · ${item.type.endsWith('selected')?`${item.targets.length} targets · `:''}${esc(scheduleLabel(item))}</span><small>Next run: ${item.enabled?esc(formatScheduleTime(item.next_run)):'Disabled'}<br>Last run: ${esc(resultLabel(item))}</small></div><div class="scheduler-card-actions"><button type="button" data-schedule-action="edit" data-schedule-id="${esc(item.id)}">Edit</button><button type="button" data-schedule-action="run" data-schedule-id="${esc(item.id)}">Run now</button><button type="button" data-schedule-action="toggle" data-schedule-id="${esc(item.id)}">${item.enabled?'Disable':'Enable'}</button><button type="button" data-schedule-action="delete" data-schedule-id="${esc(item.id)}">Delete</button></div>`;list.appendChild(card)})};
   const loadSchedules=async()=>{if(!csrfToken)return;try{renderSchedules(await scheduleApi('/api/schedules'));await loadSchedulerTargets()}catch(error){showScheduleMessage(error.message,true)}};
   const openSchedule=item=>{form.reset();form.elements.id.value=item?.id||'';form.elements.name.value=item?.name||'';form.elements.type.value=item?.type||'check-all';form.elements.time.value=item?.time||'03:00';form.elements.enabled.checked=item?item.enabled:true;selectedTargets=new Set(item?.targets||[]);form.querySelectorAll('input[name="days"]').forEach(input=>input.checked=(item?.days||['Mon','Tue','Wed','Thu','Fri','Sat','Sun']).includes(input.value));document.getElementById('schedule-modal-title').textContent=item?'Edit schedule':'Add schedule';document.getElementById('schedule-delete').hidden=!item;modal.hidden=false;form.elements.type.dispatchEvent(new Event('change'));renderTargetTable()};
   const closeSchedule=()=>{modal.hidden=true};
   document.getElementById('schedule-add').onclick=()=>openSchedule();document.getElementById('schedule-cancel').onclick=closeSchedule;document.getElementById('schedule-delete').onclick=async()=>{const id=form.elements.id.value,item=schedules.find(candidate=>candidate.id===id);if(!item||!confirm(`Delete schedule "${item.name}"?`))return;try{await scheduleApi(`/api/schedules/${id}`,{method:'DELETE'});closeSchedule();await loadSchedules()}catch(error){showScheduleMessage(error.message,true)}};
   form.elements.type.onchange=()=>{const selected=isSelected({type:form.elements.type.value});document.getElementById('schedule-targets').hidden=!selected;document.getElementById('schedule-update-warning').hidden=!form.elements.type.value.startsWith('update');renderTargetTable()};document.getElementById('target-search').oninput=renderTargetTable;document.getElementById('target-select-visible').onclick=()=>{document.querySelectorAll('#schedule-target-body [data-target-id]').forEach(input=>selectedTargets.add(input.dataset.targetId));renderTargetTable()};document.getElementById('target-clear').onclick=()=>{selectedTargets.clear();renderTargetTable()};document.getElementById('schedule-target-body').onchange=event=>{if(!event.target.matches('[data-target-id]'))return;if(event.target.checked)selectedTargets.add(event.target.dataset.targetId);else selectedTargets.delete(event.target.dataset.targetId);renderTargetTable()};
-  form.onsubmit=async event=>{event.preventDefault();const values={name:form.elements.name.value,type:form.elements.type.value,days:[...form.querySelectorAll('input[name="days"]:checked')].map(input=>input.value),time:form.elements.time.value,enabled:form.elements.enabled.checked,targets:isSelected({type:form.elements.type.value})?[...selectedTargets]:[]},id=form.elements.id.value;try{if(!values.days.length)throw new Error('Select at least one day.');if(isSelected(values)&&!values.targets.length)throw new Error('Select at least one target.');if(values.type.startsWith('update')&&!id&&!confirm('This schedule can automatically update systems using the configured safety rules. Continue?'))return;await scheduleApi(id?`/api/schedules/${id}`:'/api/schedules',{method:id?'PUT':'POST',body:JSON.stringify(values)});closeSchedule();await loadSchedules()}catch(error){showScheduleMessage(error.message,true)} };
+  form.onsubmit=async event=>{event.preventDefault();const values={name:form.elements.name.value,type:form.elements.type.value,days:[...form.querySelectorAll('input[name="days"]:checked')].map(input=>input.value),time:form.elements.time.value,enabled:form.elements.enabled.checked,targets:isSelected({type:form.elements.type.value})?[...selectedTargets]:[]},id=form.elements.id.value;try{if(!values.days.length)throw new Error('Select at least one day.');if(isSelected(values)&&!values.targets.length)throw new Error('Select at least one target.');if(values.type.startsWith('update')&&!id&&!confirm('This schedule can automatically update systems using the configured safety rules. Continue?'))return;await scheduleApi(id?`/api/schedules/${id}`:'/api/schedules',{method:id?'PUT':'POST',body:JSON.stringify(values)});closeSchedule();await loadSchedules()}catch(error){showScheduleMessage(error.message,true)} };guardSubmit(form);
   list.onclick=async event=>{const button=event.target.closest('[data-schedule-action]');if(!button)return;const item=schedules.find(candidate=>candidate.id===button.dataset.scheduleId);if(!item)return;try{if(button.dataset.scheduleAction==='edit')return openSchedule(item);if(button.dataset.scheduleAction==='delete'){if(!confirm(`Delete schedule "${item.name}"?`))return;await scheduleApi(`/api/schedules/${item.id}`,{method:'DELETE'})}else if(button.dataset.scheduleAction==='toggle'){await scheduleApi(`/api/schedules/${item.id}`,{method:'PUT',body:JSON.stringify({enabled:!item.enabled})})}else if(button.dataset.scheduleAction==='run'){button.disabled=true;await scheduleApi(`/api/schedules/${item.id}/run`,{method:'POST',body:'{}'})}await loadSchedules()}catch(error){showScheduleMessage(error.message,true)}finally{button.disabled=false}};
   window.addEventListener('scheduler-page-open',loadSchedules);window.addEventListener('uu-auth-ready',loadSchedules);if(window.__uu_authenticated&&csrfToken)loadSchedules();setInterval(()=>{if(!document.getElementById('scheduler-page').hidden&&csrfToken)loadSchedules()},10000);
 })();
@@ -1203,17 +1258,19 @@ def parse_updater_version_output(output):
 
 
 def parse_config_text(content):
+    """Return the values the scripts read: awk -F'"' '/^KEY=/ {print $2}'.
+
+    Only KEY= at the start of a line counts, and the value is the text
+    between the first two double quotes (empty when unquoted). Showing
+    anything else would present settings that the updater ignores.
+    """
     values = {}
     for line in content.splitlines():
-        match = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)(?:\s+#.*)?$", line)
+        match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)=", line)
         if not match or match.group(1) not in CONFIG_KEYS:
             continue
-        raw = match.group(2).strip()
-        try:
-            parsed = shlex.split(raw, comments=False, posix=True)
-        except ValueError:
-            parsed = []
-        values[match.group(1)] = parsed[0] if parsed else raw.strip("\"'")
+        fields = line.split('"')
+        values[match.group(1)] = fields[1] if len(fields) > 1 else ""
     return values
 
 
@@ -1346,30 +1403,49 @@ def validate_config_values(values):
         else:
             if not isinstance(value, str) or "\n" in value or "\r" in value or len(value) > 512:
                 raise ValueError(f"{key} must be a short single-line value.")
-            if key == "BACKUP_STORAGE" and value and not re.fullmatch(r"[A-Za-z0-9_.-]+", value):
-                raise ValueError("BACKUP_STORAGE contains unsupported characters.")
+            if not CONFIG_STRING_PATTERNS[key].fullmatch(value):
+                raise ValueError(f"{key} contains unsupported characters.")
             normalized[key] = value
     return normalized
 
 
+def _config_line_comment(rest):
+    """Return the trailing comment after an assignment's old value, if any."""
+    rest = rest.lstrip(" \t")
+    if rest[:1] in {'"', "'"}:
+        end = rest.find(rest[0], 1)
+        after = rest[end + 1:] if end > 0 else ""
+    else:
+        after = rest[len(re.match(r"[^ \t]*", rest).group()):]  # unquoted: up to the first blank
+    after = after.rstrip()
+    return after if re.fullmatch(r"[ \t]+#.*", after) else ""
+
+
 def update_config_text(content, normalized):
-    lines = content.splitlines(keepends=True)
-    found = set()
-    output = []
-    for line in lines:
-        match = re.match(r"^(\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(\"[^\"]*\"|'[^']*'|[^#\s]*)(.*?)(\r?\n)?$", line)
-        if not match or match.group(2) not in normalized:
+    """Write KEY="value" exactly the way the scripts read it back.
+
+    Values are validated to contain no double quote or backslash, so no
+    escaping is needed; the JSON escapes used before (\\", \\u00e9) were
+    read back literally by awk. Indented or spaced assignments, which the
+    scripts ignore, are rewritten in the canonical form.
+    """
+    output, found = [], set()
+    for line in content.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        ending = line[len(body):]
+        match = re.match(r"[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*=", body)
+        if not match or match.group(1) not in normalized:
             output.append(line)
             continue
-        key = match.group(2)
+        key = match.group(1)
         found.add(key)
-        tail = match.group(5) or ""
-        output.append(f"{match.group(1)}{key}{match.group(3)}{json.dumps(normalized[key])}{tail}{match.group(6) or ''}")
+        comment = _config_line_comment(body[match.end():])
+        output.append(f'{key}="{normalized[key]}"{comment}{ending}')
     if output and not output[-1].endswith("\n"):
         output[-1] += "\n"
     for key in normalized:
         if key not in found:
-            output.append(f"{key}={json.dumps(normalized[key])}\n")
+            output.append(f'{key}="{normalized[key]}"\n')
     return "".join(output)
 
 
@@ -1883,9 +1959,22 @@ def update_inventory_text(content, target, current_id=None, delete=False):
     return content[:start] + "".join(new_lines) + content[end:]
 
 
+class RequestConflict(Exception):
+    """A request that cannot be applied to the current file content."""
+
+    def __init__(self, status, code, message):
+        super().__init__(message)
+        self.status, self.code, self.message = status, code, message
+
+
 def locked_atomic_update(path, updater):
+    """Read, transform, and replace a file under an exclusive lock.
+
+    The lock file name matches config-merge.sh (<file>.lock), which merges
+    update.conf during installer updates.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = Path(str(path) + ".uu-lock")
+    lock_path = Path(str(path) + ".lock")
     with lock_path.open("a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         content = path.read_text(encoding="utf-8") if path.exists() else ""
@@ -2719,46 +2808,58 @@ class StatusHandler(BaseHTTPRequestHandler):
         )
         self.send_json({"available": True, "scope": scope, "preview": preview})
 
+    def change_inventory(self, change):
+        """Apply change(content) to targets.conf under its lock.
+
+        The checks and the rewrite must see the same content: computed
+        outside the lock, a concurrent edit was silently overwritten.
+        Returns False after answering a RequestConflict.
+        """
+        def updater(content):
+            validate_inventory_text(content, self.server.inventory_script)
+            updated = change(content)
+            validate_inventory_text(updated, self.server.inventory_script)
+            return updated
+        try:
+            locked_atomic_update(self.server.inventory_file, updater)
+        except RequestConflict as error:
+            self.send_json(error_payload(error.code, error.message), error.status)
+            return False
+        return True
+
+    @staticmethod
+    def existing_ssh_target(content, target_id):
+        existing = next((item for item in inventory_payload(content) if item["id"] == target_id), None)
+        if not existing:
+            raise RequestConflict(HTTPStatus.NOT_FOUND, "TARGET_NOT_FOUND", "That external target does not exist.")
+        if existing["transport"] != "ssh":
+            raise ValueError("Only external SSH targets can be managed in the web UI.")
+
     def handle_target_add(self, payload):
         target = validate_target_payload(payload)
-        content = self.inventory_content()
-        validate_inventory_text(content, self.server.inventory_script)
-        if any(item["id"] == target["id"] for item in inventory_payload(content)):
-            self.send_json(error_payload("TARGET_EXISTS", "That external target already exists."), HTTPStatus.CONFLICT)
-            return
-        updated = update_inventory_text(content, target)
-        validate_inventory_text(updated, self.server.inventory_script)
-        locked_atomic_update(self.server.inventory_file, lambda _: updated)
-        self.send_json({"message": "External target added.", "target": target}, HTTPStatus.CREATED)
+
+        def change(content):
+            if any(item["id"] == target["id"] for item in inventory_payload(content)):
+                raise RequestConflict(HTTPStatus.CONFLICT, "TARGET_EXISTS", "That external target already exists.")
+            return update_inventory_text(content, target)
+        if self.change_inventory(change):
+            self.send_json({"message": "External target added.", "target": target}, HTTPStatus.CREATED)
 
     def handle_target_update(self, target_id, payload):
         current = validate_target_payload({"id": target_id, **(payload if isinstance(payload, dict) else {})}, target_id)
-        content = self.inventory_content()
-        validate_inventory_text(content, self.server.inventory_script)
-        existing = next((item for item in inventory_payload(content) if item["id"] == target_id), None)
-        if not existing:
-            self.send_json(error_payload("TARGET_NOT_FOUND", "That external target does not exist."), HTTPStatus.NOT_FOUND)
-            return
-        if existing["transport"] != "ssh":
-            raise ValueError("Only external SSH targets can be managed in the web UI.")
-        updated = update_inventory_text(content, current, target_id)
-        validate_inventory_text(updated, self.server.inventory_script)
-        locked_atomic_update(self.server.inventory_file, lambda _: updated)
-        self.send_json({"message": "External target saved.", "target": current})
+
+        def change(content):
+            self.existing_ssh_target(content, target_id)
+            return update_inventory_text(content, current, target_id)
+        if self.change_inventory(change):
+            self.send_json({"message": "External target saved.", "target": current})
 
     def handle_target_delete(self, target_id):
-        content = self.inventory_content()
-        validate_inventory_text(content, self.server.inventory_script)
-        existing = next((item for item in inventory_payload(content) if item["id"] == target_id), None)
-        if not existing:
-            self.send_json(error_payload("TARGET_NOT_FOUND", "That external target does not exist."), HTTPStatus.NOT_FOUND)
-            return
-        if existing["transport"] != "ssh":
-            raise ValueError("Only external SSH targets can be managed in the web UI.")
-        updated = update_inventory_text(content, {"id": target_id}, target_id, delete=True)
-        validate_inventory_text(updated, self.server.inventory_script)
-        locked_atomic_update(self.server.inventory_file, lambda _: updated)
-        self.send_json({"message": "External target removed.", "target": target_id})
+        def change(content):
+            self.existing_ssh_target(content, target_id)
+            return update_inventory_text(content, {"id": target_id}, target_id, delete=True)
+        if self.change_inventory(change):
+            self.send_json({"message": "External target removed.", "target": target_id})
 
     def handle_target_test(self, target_id, payload=None):
         if not self.valid_target(target_id):
@@ -2871,26 +2972,33 @@ class StatusHandler(BaseHTTPRequestHandler):
         except (RuntimeError, ValueError, OSError, OverflowError):
             return None
 
-    def scheduler_last_run(self, schedule):
-        try:
-            jobs = self.jobs()
-        except (OSError, RuntimeError, subprocess.TimeoutExpired):
-            return None
-        matches = [job for job in jobs if job.get("source") == "scheduler"
-                   and job.get("type") == ("check" if schedule["type"].startswith("check") else "update")]
+    def scheduler_last_run(self, schedule, jobs=None):
+        if jobs is None:
+            try:
+                jobs = self.jobs()
+            except (OSError, RuntimeError, subprocess.TimeoutExpired):
+                return None
+        # Only runs of this schedule: every schedule of the same type used to
+        # show the newest scheduled job of that type.
+        source = scheduler_job_source(schedule["id"])
+        matches = [job for job in jobs if job.get("source") == source]
         if not matches:
             return None
         job = sorted(matches, key=lambda item: item.get("started_at") or "", reverse=True)[0]
         return {"timestamp": job.get("started_at"), "result": job.get("state"), "job": job.get("unit")}
 
-    def scheduler_projection(self, schedule):
+    def scheduler_projection(self, schedule, jobs=None):
         item = dict(schedule)
         item["next_run"] = self.scheduler_next_run(schedule)
-        item["last_run"] = self.scheduler_last_run(schedule)
+        item["last_run"] = self.scheduler_last_run(schedule, jobs)
         return item
 
     def handle_scheduler_get(self):
-        schedules = [self.scheduler_projection(item) for item in self.scheduler_read()]
+        try:
+            jobs = self.jobs()  # one job-runner call for all schedules
+        except (OSError, RuntimeError, subprocess.TimeoutExpired):
+            jobs = []
+        schedules = [self.scheduler_projection(item, jobs) for item in self.scheduler_read()]
         timezone_name = datetime.now().astimezone().tzname() or "system local time"
         self.send_json({"timezone": timezone_name, "schedules": schedules})
 
@@ -2900,37 +3008,64 @@ class StatusHandler(BaseHTTPRequestHandler):
     def handle_scheduler_create(self, payload):
         schedule_id = secrets.token_hex(6)
         schedule = scheduler_validate(payload, schedule_id)
-        schedules = self.scheduler_read()
-        schedules.append(schedule)
-        try:
-            self.scheduler_write_units(schedule)
-            scheduler_save(self.server.scheduler_file, schedules)
-        except (OSError, RuntimeError, ValueError):
+        with SCHEDULER_LOCK:
+            schedules = self.scheduler_read()
+            schedules.append(schedule)
             try:
-                self.scheduler_remove_unit(schedule_id)
+                self.scheduler_write_units(schedule)
+                scheduler_save(self.server.scheduler_file, schedules)
             except (OSError, RuntimeError, ValueError):
-                pass
-            raise
+                try:
+                    self.scheduler_remove_unit(schedule_id)
+                except (OSError, RuntimeError, ValueError):
+                    pass
+                raise
         self.send_json({"schedule": self.scheduler_projection(schedule)}, HTTPStatus.CREATED)
 
     def handle_scheduler_update(self, schedule_id, payload):
-        schedules = self.scheduler_read()
-        current = next((item for item in schedules if item["id"] == schedule_id), None)
-        if current is None:
-            raise KeyError(schedule_id)
-        schedule = scheduler_validate({**current, **(payload if isinstance(payload, dict) else {})}, schedule_id)
-        updated = [schedule if item["id"] == schedule_id else item for item in schedules]
-        try:
-            self.scheduler_write_units(schedule)
-            scheduler_save(self.server.scheduler_file, updated)
-        except (OSError, RuntimeError, ValueError):
+        with SCHEDULER_LOCK:
+            schedules = self.scheduler_read()
+            current = next((item for item in schedules if item["id"] == schedule_id), None)
+            if current is None:
+                raise KeyError(schedule_id)
+            schedule = scheduler_validate({**current, **(payload if isinstance(payload, dict) else {})}, schedule_id)
+            updated = [schedule if item["id"] == schedule_id else item for item in schedules]
             try:
-                self.scheduler_write_units(current)
-                scheduler_save(self.server.scheduler_file, schedules)
+                self.scheduler_write_units(schedule)
+                scheduler_save(self.server.scheduler_file, updated)
             except (OSError, RuntimeError, ValueError):
-                pass
-            raise
+                try:
+                    self.scheduler_write_units(current)
+                    scheduler_save(self.server.scheduler_file, schedules)
+                except (OSError, RuntimeError, ValueError):
+                    pass
+                raise
         self.send_json({"schedule": self.scheduler_projection(schedule)})
+
+    def handle_scheduler_delete(self, schedule_id):
+        with SCHEDULER_LOCK:
+            try:
+                schedules = self.scheduler_read()
+            except (OSError, ValueError, RuntimeError):
+                self.send_json(error_payload("SCHEDULER_UNAVAILABLE", "Scheduler data is unavailable."), HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            current = next((item for item in schedules if item["id"] == schedule_id), None)
+            if current is None:
+                self.send_json(error_payload("SCHEDULE_NOT_FOUND", "That schedule does not exist."), HTTPStatus.NOT_FOUND)
+                return
+            remaining = [item for item in schedules if item["id"] != schedule_id]
+            try:
+                scheduler_save(self.server.scheduler_file, remaining)
+                self.scheduler_remove_unit(schedule_id)
+            except (OSError, RuntimeError, ValueError) as error:
+                try:
+                    scheduler_save(self.server.scheduler_file, schedules)
+                    self.scheduler_write_units(current)
+                except (OSError, RuntimeError, ValueError):
+                    pass
+                self.send_json(error_payload("SCHEDULE_NOT_REMOVED", str(error) or "Schedule could not be removed."), HTTPStatus.UNPROCESSABLE_ENTITY)
+                return
+        self.send_json({"message": "Schedule removed."})
 
     def handle_scheduler_run(self, schedule_id):
         schedule = next((item for item in self.scheduler_read() if item["id"] == schedule_id), None)
@@ -2938,7 +3073,8 @@ class StatusHandler(BaseHTTPRequestHandler):
             raise KeyError(schedule_id)
         started, errors = [], []
         for command in scheduler_commands(schedule, self.server.cli):
-            result = self.run_command(command, timeout=30, extra_env={"UU_JOB_SOURCE": "scheduler"})
+            result = self.run_command(command, timeout=30,
+                                      extra_env={"UU_JOB_SOURCE": scheduler_job_source(schedule_id)})
             output = f"{result.stdout}\n{result.stderr}"
             job_match = re.search(r"^Job:\s*(\S+)", output, re.MULTILINE)
             if result.returncode == 3:
@@ -3186,8 +3322,16 @@ class StatusHandler(BaseHTTPRequestHandler):
         if len(parts) == 3 and parts[:2] == ["api", "external-backup"]:
             target_id = parts[2]
             reference = payload.get("reference", "") if isinstance(payload, dict) else ""
-            if not isinstance(reference, str):
-                self.send_json(error_payload("INVALID_BACKUP_REFERENCE", "Backup reference must be text."), HTTPStatus.BAD_REQUEST)
+            if not TARGET_RE.fullmatch(target_id):
+                self.send_json(error_payload("INVALID_TARGET", "The target name is invalid."), HTTPStatus.BAD_REQUEST)
+                return
+            # Same limits as external-backup-safety.sh, reported instead of a
+            # generic "could not be recorded".
+            if (not isinstance(reference, str) or len(reference) > 200
+                    or any(ord(character) < 32 or ord(character) == 127 for character in reference)):
+                self.send_json(error_payload("INVALID_BACKUP_REFERENCE",
+                                             "Backup reference must be single-line text of at most 200 characters."),
+                               HTTPStatus.BAD_REQUEST)
                 return
             try:
                 result = self.run_command([str(self.server.cli), "external", "verify-backup", target_id, reference], timeout=15)
@@ -3203,7 +3347,10 @@ class StatusHandler(BaseHTTPRequestHandler):
         if urlsplit(self.path).path == "/api/config":
             try:
                 self.handle_config_update(payload)
-            except (OSError, ValueError, subprocess.TimeoutExpired):
+            except ValueError as error:  # validation messages name the setting and the rule
+                self.send_json(error_payload("CONFIG_NOT_SAVED", f"Configuration was not changed: {error}"),
+                               HTTPStatus.UNPROCESSABLE_ENTITY)
+            except (OSError, subprocess.TimeoutExpired):
                 self.send_json(error_payload("CONFIG_NOT_SAVED", "Configuration was rejected and not changed."), HTTPStatus.UNPROCESSABLE_ENTITY)
             return
         if len(parts) == 3 and parts[:2] == ["api", "external-settings"]:
@@ -3465,28 +3612,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             return
         parts = [unquote(part) for part in urlsplit(self.path).path.split("/") if part]
         if len(parts) == 3 and parts[:2] == ["api", "schedules"]:
-            try:
-                schedules = self.scheduler_read()
-            except (OSError, ValueError, RuntimeError):
-                self.send_json(error_payload("SCHEDULER_UNAVAILABLE", "Scheduler data is unavailable."), HTTPStatus.SERVICE_UNAVAILABLE)
-                return
-            current = next((item for item in schedules if item["id"] == parts[2]), None)
-            if current is None:
-                self.send_json(error_payload("SCHEDULE_NOT_FOUND", "That schedule does not exist."), HTTPStatus.NOT_FOUND)
-                return
-            remaining = [item for item in schedules if item["id"] != parts[2]]
-            try:
-                scheduler_save(self.server.scheduler_file, remaining)
-                self.scheduler_remove_unit(parts[2])
-            except (OSError, RuntimeError, ValueError) as error:
-                try:
-                    scheduler_save(self.server.scheduler_file, schedules)
-                    self.scheduler_write_units(current)
-                except (OSError, RuntimeError, ValueError):
-                    pass
-                self.send_json(error_payload("SCHEDULE_NOT_REMOVED", str(error) or "Schedule could not be removed."), HTTPStatus.UNPROCESSABLE_ENTITY)
-                return
-            self.send_json({"message": "Schedule removed."})
+            self.handle_scheduler_delete(parts[2])
             return
         if len(parts) == 4 and parts[:2] == ["api", "internal-ssh"]:
             try:
@@ -3554,6 +3680,12 @@ def main():
     server.version_refresh_lock = threading.Lock()
     server.version_refresh_running = False
     server.auth = AuthStore(args.auth_file)
+    try:
+        refreshed = scheduler_refresh_units(server.scheduler_file, server.scheduler_unit_dir, server.cli)
+        if refreshed:
+            print(f"Updated scheduler units: {', '.join(refreshed)}", flush=True)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print(f"Scheduler units could not be refreshed: {error}", flush=True)
     if tls_context is not None:
         print(f"HTTPS enabled; certificate source: {tls_source}; certificate: {tls_cert}", flush=True)
         protocol = "https"
