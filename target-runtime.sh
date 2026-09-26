@@ -26,6 +26,13 @@ QGA_CONFIG_ENABLED() {
   esac
 }
 
+# A hibernated VM (qm suspend --todisk) reports "stopped" and keeps its RAM
+# in a vmstate volume. Starting it resumes that state; stopping it after a
+# check or update then discards it.
+VM_IS_HIBERNATED() {
+  qm config "$1" 2>/dev/null | grep -Eq '^(lock: suspend(ed|ing)|vmstate:)'
+}
+
 RUN_LOCAL_COMMAND() {
   "$@"
 }

@@ -798,7 +798,9 @@ CHECK_HOST_ITSELF () {
   local STATUS_HOST_NAME="${STATUS_MODEL_NODE:-$HOSTNAME}"
   apt-get update >/dev/null 2>&1
   local APT_OUTPUT
-  APT_OUTPUT=$(apt-get -s upgrade)
+  # Same command as the update (dist-upgrade): `-s upgrade` hid held-back
+  # packages such as a new proxmox-kernel pulled in by proxmox-default-kernel.
+  APT_OUTPUT=$(apt-get -s dist-upgrade)
   # Keep the log and status model on the same package-manager snapshot.  The
   # shared helper owns the security classification and disjoint split.
   READ_APT_UPDATE_COUNTS "$APT_OUTPUT"
@@ -988,8 +990,8 @@ CHECK_CONTAINER () {
       CHECK_CONTAINER_FAILURE "apt-get update failed for LXC $CONTAINER"
       return
     fi
-    if ! APT_OUTPUT=$(RUN_PCT_COMMAND "$CONTAINER" bash -c "apt-get -s upgrade"); then
-      CHECK_CONTAINER_FAILURE "apt-get -s upgrade failed for LXC $CONTAINER"
+    if ! APT_OUTPUT=$(RUN_PCT_COMMAND "$CONTAINER" bash -c "apt-get -s dist-upgrade"); then
+      CHECK_CONTAINER_FAILURE "apt-get -s dist-upgrade failed for LXC $CONTAINER"
       return
     fi
     READ_APT_UPDATE_COUNTS "$APT_OUTPUT"
@@ -1049,7 +1051,7 @@ CHECK_CONTAINER () {
       echo -e "${GN}LXC ${BL}$CONTAINER${CL} : ${GN}$NAME${CL}"
       printf '%s\n' "$CONTAINER_UPDATES"
     fi
-  else
+  elif [[ "$OS" =~ centos ]]; then   # also the Proxmox ostype of Rocky and Alma
     if ! UPDATES=$(RUN_PCT_COMMAND "$CONTAINER" sh -c "$YUM_COUNT_COMMAND"); then
       CHECK_CONTAINER_FAILURE "yum check-update failed for LXC $CONTAINER"
       return
@@ -1063,6 +1065,12 @@ CHECK_CONTAINER () {
       echo -e "${GN}LXC ${BL}$CONTAINER${CL} : ${GN}$NAME${CL}"
       printf '%s\n' "$CONTAINER_UPDATES"
     fi
+  else
+    # openSUSE, Gentoo, NixOS, unmanaged: the yum fallback used to fail
+    # quietly and report "0 updates, ok".
+    STATUS_MODEL_RECORD "$CONTAINER" lxc pct true "$OS_DISPLAY" "${OS,,}" "null" "null" unsupported UNSUPPORTED_OS \
+      "No supported updater for LXC ostype ${OS:-unknown}" "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME"
+    return 0
   fi
   [[ "$CONTAINER_UPDATES" -gt 0 ]] && CONTAINER_STATUS=updates_available
   STATUS_MODEL_RECORD "$CONTAINER" lxc pct true "$OS_DISPLAY" "${OS,,}" "$CONTAINER_UPDATES" "$CONTAINER_REBOOT" "$CONTAINER_STATUS" "" "" "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME" "$CONTAINER_NORMAL_UPDATES" "$CONTAINER_SECURITY_UPDATES"
@@ -1214,8 +1222,11 @@ CHECK_VM_LIFECYCLE () {
       STATUS_MODEL_RECORD "$VM" vm qga false "" "" "null" "null" not_checked STOPPED_READ_ONLY "VM $VM is stopped; configured check does not start stopped VMs" "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME"
       return 0
     fi
-    if [[ $(qm config "$VM" | grep 'lock:' | sed 's/lock:\s*//') == "suspend" ]]; then
-      echo -e "${OR}skip suspend VM${CL}"
+    # The lock values are "suspending"/"suspended"; comparing with "suspend"
+    # never matched, so hibernated VMs were resumed and then powered off.
+    if VM_IS_HIBERNATED "$VM"; then
+      echo -e "${OR}skip hibernated VM $VM${CL}"
+      STATUS_MODEL_RECORD "$VM" vm qga false "" "" "null" "null" not_checked HIBERNATED_READ_ONLY "VM $VM is hibernated; the check did not resume it" "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME"
       return 0
     fi
     if ! RUN_PROXMOX_COMMAND qm start "$VM"; then
@@ -1232,7 +1243,9 @@ CHECK_VM_LIFECYCLE () {
       STATUS_MODEL_RECORD "$VM" vm qga false "" "" "null" "null" offline QGA_NOT_READY "QEMU Guest Agent was not ready"
       check_rc=1
     fi
-    if ! RUN_PROXMOX_COMMAND qm stop "$VM"; then
+    # A clean shutdown (forced only after two minutes) instead of pulling the
+    # plug on a guest that was just booted for a read-only check.
+    if ! RUN_PROXMOX_COMMAND qm shutdown "$VM" --timeout 120 --forceStop 1; then
       lifecycle_failure=1
       lifecycle_message="Could not restore stopped state for VM $VM"
     elif [[ "$(timeout 10 qm status "$VM" 2>/dev/null)" != "status: stopped" ]]; then
@@ -1382,7 +1395,7 @@ CHECK_VM () {
     fi
     if [[ ${OS,,} =~ ubuntu|mint|kali|debian|devuan ]]; then
       RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "apt-get update" >/dev/null 2>&1
-      APT_OUTPUT=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "apt-get -s upgrade")
+      APT_OUTPUT=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "apt-get -s --with-new-pkgs upgrade")
       READ_APT_UPDATE_COUNTS "$APT_OUTPUT"
       if RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" stat /var/run/reboot-required.pkgs >/dev/null 2>&1; then
         REBOOT_REQUIRED=true
@@ -1558,13 +1571,13 @@ CHECK_VM_QEMU () {
         echo -e "${RD}QEMU apt update failed for VM $VM: ${QEMU_EXEC_OUTPUT}${CL}"
         return 1
       fi
-      QEMU_GUEST_EXEC "$VM" --timeout 120 -- bash -c "apt-get -s upgrade | grep -ci '^inst.*security'"
+      QEMU_GUEST_EXEC "$VM" --timeout 120 -- bash -c "apt-get -s --with-new-pkgs upgrade | grep -ci '^inst.*security'"
       QEMU_COUNT_RESULT_OK "QEMU security update check for VM $VM" || return 1
       SECURITY_APT_UPDATES="$QEMU_EXEC_STDOUT"
       SECURITY_APT_UPDATES=$(SANITIZE_NUMBER "$SECURITY_APT_UPDATES")
       SECURITY_APT_UPDATES=${SECURITY_APT_UPDATES:-0}
       if [[ "$SECURITY_APT_UPDATES" -gt 0 ]]; then SECURITY_UPDATES_AVALABLE=true; fi
-      QEMU_GUEST_EXEC "$VM" --timeout 120 -- bash -c "apt-get -s upgrade | grep -ci '^inst.'"
+      QEMU_GUEST_EXEC "$VM" --timeout 120 -- bash -c "apt-get -s --with-new-pkgs upgrade | grep -ci '^inst.'"
       QEMU_COUNT_RESULT_OK "QEMU update check for VM $VM" || return 1
       NORMAL_APT_UPDATES="$QEMU_EXEC_STDOUT"
       NORMAL_APT_UPDATES=$(SANITIZE_NUMBER "$NORMAL_APT_UPDATES")
@@ -1718,10 +1731,8 @@ EXIT () {
         } > "$LOCAL_FILES/mail-output"
         chmod 640 "$LOCAL_FILES/mail-output"
         if [[ $(stat -c%s "$LOCAL_FILES/mail-output") -gt 46 ]]; then
-          # check variable !!!
-          if [[ "$EMAIL_ONLY_SECURITY" == true && "$SECURITY_UPDATES_AVALABLE" == true ]]; then
-            mail -a 'Content-Type: text/plain; charset=UTF-8' -a 'Content-Transfer-Encoding: 8bit' -r "$EMAIL_SENDER" -s "Ultimate Updater summary - $HOSTNAME" "$EMAIL_USER" < "$LOCAL_FILES"/mail-output
-          else
+          # Both branches used to send the same mail.
+          if [[ "$EMAIL_ONLY_SECURITY" != true || "$SECURITY_UPDATES_AVALABLE" == true ]]; then
             mail -a 'Content-Type: text/plain; charset=UTF-8' -a 'Content-Transfer-Encoding: 8bit' -r "$EMAIL_SENDER" -s "Ultimate Updater summary - $HOSTNAME" "$EMAIL_USER" < "$LOCAL_FILES"/mail-output
           fi
         elif [[ "$EMAIL_NO_UPDATES" == true ]]; then

@@ -86,7 +86,7 @@ RUN_PCT_COMMAND() {
   if [[ "${1:-}" == bash && "${2:-}" == -c && "${3:-}" == "apt-get update" ]]; then
     return 0
   fi
-  if [[ "${1:-}" == bash && "${2:-}" == -c && "${3:-}" == "apt-get -s upgrade" ]]; then
+  if [[ "${1:-}" == bash && "${2:-}" == -c && "${3:-}" == "apt-get -s dist-upgrade" ]]; then
     printf '0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.\n'
     return 0
   fi
@@ -104,3 +104,31 @@ HARNESS
 chmod 750 "$WORK_DIR/hostname-fallback.sh"
 (cd "$WORK_DIR" && bash hostname-fallback.sh)
 echo 'remote LXC hostname fallback: PASS'
+
+# An LXC without a supported package manager is "unsupported", not
+# "0 updates, ok" from a failing yum fallback.
+cat > "$WORK_DIR/unsupported.sh" <<'HARNESS'
+#!/bin/bash
+set -euo pipefail
+LOCAL_FILES="$PWD/remote-run"
+CONTAINER=240 RDU=false STATUS_MODEL_NODE=node2 STATUS_MODEL_GUEST_NAME=suse INITIAL_INVENTORY=false
+STATUS_MODEL_RECORD_FILE="$PWD/unsupported-records"
+YL='' CL=''
+SANITIZE_NUMBER() { tr -cd '0-9' <<< "$1"; }
+cluster_target_guest_name() { printf 'suse\n'; }
+STATUS_MODEL_RECORD() { printf '%s\n' "$*" >> "$STATUS_MODEL_RECORD_FILE"; }
+RUN_PCT_COMMAND() {
+  shift
+  case "$*" in
+    hostname) printf 'suse\n' ;;
+    'sh -c cat /etc/os-release') printf 'ID="opensuse-leap"\nPRETTY_NAME="openSUSE Leap 15.6"\n' ;;
+    *) echo "unexpected guest command: $*" >&2; return 1 ;;
+  esac
+}
+pct() { printf 'ostype: opensuse\n'; }
+source "$PWD/check-container.sh"
+CHECK_CONTAINER 240
+grep -Fq '240 lxc pct true openSUSE Leap 15.6 opensuse null null unsupported UNSUPPORTED_OS' "$STATUS_MODEL_RECORD_FILE"
+HARNESS
+(cd "$WORK_DIR" && bash unsupported.sh)
+echo 'unsupported LXC ostype: PASS'

@@ -35,6 +35,7 @@ else
   RUN_PROXMOX_CAPTURE() { local rc; PROXMOX_CAPTURE_OUTPUT=$("$@" 2>&1); rc=$?; [[ "${DEBUG:-false}" == true && -n "$PROXMOX_CAPTURE_OUTPUT" ]] && printf '%s\n' "$PROXMOX_CAPTURE_OUTPUT"; return "$rc"; }
   INTERNET_CHECK_COMMAND() { [[ "${CHECK_URL:-}" =~ ^[A-Za-z0-9:][A-Za-z0-9.:-]*$ ]] && printf 'ping -q -c1 %s >/dev/null 2>&1' "$CHECK_URL"; }
   PACMAN_ENVIRONMENT_ASSIGNMENTS() { [[ -z "${PACMAN_ENVIRONMENT:-}" ]]; }
+  VM_IS_HIBERNATED() { qm config "$1" 2>/dev/null | grep -Eq '^(lock: suspend(ed|ing)|vmstate:)'; }
 fi
 CLUSTER_TARGET_FILE="${CLUSTER_TARGET_FILE:-$LOCAL_FILES/cluster-target.sh}"
 if [[ -f "$CLUSTER_TARGET_FILE" ]]; then
@@ -1679,7 +1680,13 @@ UPDATE_CONTAINER () {
     TRIM_FILESYSTEM
     UPDATE_CHECK
   else
-    echo -e "${OR:-}The system could not be idetified.${CL:-}"
+    echo -e "${OR:-}The system could not be identified.${CL:-}"
+    # Not a success: nothing was updated.
+    ERROR_CODE=2
+    ID=$CONTAINER
+    ERROR_MSG="No supported package manager for LXC ostype ${OS:-unknown}"
+    ERROR
+    return
   fi
   if declare -f STATUS_MODEL_UPDATE_RESULT >/dev/null 2>&1; then
     STATUS_MODEL_UPDATE_RESULT "$CONTAINER" success 0 || true
@@ -1718,7 +1725,9 @@ VM_UPDATE_START () {
       echo -e "${OR:-}  Windows is not supported for now.\n  I'm working on it ;)${CL:-}\n\n"
     else
       STATUS=$(qm status "$VM")
-      if [[ "$STATUS" == "status: stopped" && "$STOPPED_VM" == true ]]; then
+      if [[ "$STATUS" == "status: stopped" && "$STOPPED_VM" == true ]] && VM_IS_HIBERNATED "$VM"; then
+        echo -e "⏩${BL:-} Skipped VM $VM because it is hibernated${CL:-}\n\n"
+      elif [[ "$STATUS" == "status: stopped" && "$STOPPED_VM" == true ]]; then
         # Check if update is possible
         if QGA_CONFIG_ENABLED "$VM" || [[ -f $LOCAL_FILES/VMs/$VM ]]; then
           # Start the VM
@@ -1854,10 +1863,10 @@ UPDATE_VM () {
         if [[ $ERROR_CODE != "" ]]; then return; fi
         echo -e "\n${OR:-}--- APT UPGRADE ---${CL:-}"
         if [[ "$INCLUDE_PHASED_UPDATES" != "true" ]]; then
-          RUN_STEP "$VM" ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" "$UPDATE_USER" apt-get "${DPKG_OPTIONS[@]}" upgrade -y
+          RUN_STEP "$VM" ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" "$UPDATE_USER" apt-get "${DPKG_OPTIONS[@]}" --with-new-pkgs upgrade -y
           if [[ $ERROR_CODE != "" ]]; then return; fi
         else
-          RUN_STEP "$VM" ssh -q -p "$SSH_VM_PORT" -tt "$USER"@"$IP" "$UPDATE_USER" apt-get "${DPKG_OPTIONS[@]}" -o APT::Get::Always-Include-Phased-Updates=true upgrade -y
+          RUN_STEP "$VM" ssh -q -p "$SSH_VM_PORT" -tt "$USER"@"$IP" "$UPDATE_USER" apt-get "${DPKG_OPTIONS[@]}" -o APT::Get::Always-Include-Phased-Updates=true --with-new-pkgs upgrade -y
           if [[ $ERROR_CODE != "" ]]; then return; fi
         fi
         echo -e "\n${OR:-}--- APT CLEANING ---${CL:-}"
@@ -1962,10 +1971,10 @@ UPDATE_VM_QEMU () {
       if [[ $ERROR_CODE != "" ]]; then return; fi
       echo -e "\n${OR:-}--- APT UPGRADE ---${CL:-}"
       if [[ "$INCLUDE_PHASED_UPDATES" != "true" ]]; then
-        RUN_QEMU_DURABLE "$VM" --timeout "$QGA_UPDATE_TIMEOUT" -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get $DPKG_OPTIONS_STRING upgrade -y" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
+        RUN_QEMU_DURABLE "$VM" --timeout "$QGA_UPDATE_TIMEOUT" -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get $DPKG_OPTIONS_STRING --with-new-pkgs upgrade -y" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
         if [[ $ERROR_CODE != "" ]]; then return; fi
       else
-        RUN_QEMU_DURABLE "$VM" --timeout "$QGA_UPDATE_TIMEOUT" -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get $DPKG_OPTIONS_STRING -o APT::Get::Always-Include-Phased-Updates=true upgrade -y" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
+        RUN_QEMU_DURABLE "$VM" --timeout "$QGA_UPDATE_TIMEOUT" -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get $DPKG_OPTIONS_STRING -o APT::Get::Always-Include-Phased-Updates=true --with-new-pkgs upgrade -y" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG="$QEMU_EXEC_OUTPUT"; ERROR; }
         if [[ $ERROR_CODE != "" ]]; then return; fi
       fi
       echo -e "\n${OR:-}--- APT CLEANING ---${CL:-}"

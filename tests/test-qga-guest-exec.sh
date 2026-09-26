@@ -112,7 +112,7 @@ grep -Fq 'guest update complete' <<< "$QEMU_EXEC_STDOUT"
 [[ $(grep -Fc 'systemd-run' "$durable_calls") == 1 ]]
 grep -Fq 'RUN_QEMU_DURABLE "$VM" --timeout "$QGA_UPDATE_TIMEOUT"' "$ROOT_DIR/update.sh"
 grep -Fq 'RUN_QEMU_COMMAND "$VM" --timeout "$QGA_UPDATE_TIMEOUT" -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get update -y"' "$ROOT_DIR/update.sh"
-grep -Fq 'DEBIAN_FRONTEND=noninteractive apt-get $DPKG_OPTIONS_STRING upgrade -y' "$ROOT_DIR/update.sh"
+grep -Fq 'DEBIAN_FRONTEND=noninteractive apt-get $DPKG_OPTIONS_STRING --with-new-pkgs upgrade -y' "$ROOT_DIR/update.sh"
 
 echo 'QGA durable guest-job recovery test: PASS'
 

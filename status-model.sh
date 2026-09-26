@@ -510,6 +510,23 @@ PY
   return "$result"
 }
 
+# Succeed when any target in the status file reports security updates.
+STATUS_MODEL_HAS_SECURITY_UPDATES() {
+  python3 - "$1" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        targets = json.load(source).get("targets", [])
+except (OSError, ValueError, AttributeError):
+    raise SystemExit(1)
+found = any(isinstance(target, dict) and type(target.get("security_updates")) is int
+            and target["security_updates"] > 0 for target in targets)
+raise SystemExit(0 if found else 1)
+PY
+}
+
 # Render and optionally send one notification from the unified status model.
 # The first output line is an internal decision marker; callers remove it
 # before writing the human-readable mail body.
@@ -534,13 +551,11 @@ STATUS_MODEL_SEND_NOTIFICATION() {
   state=${state#STATE=}
   body=${notification#*$'\n'}
 
-  # The status schema does not classify security updates. Preserve the
-  # existing security-only policy by using the check output as the gate.
-  if [[ "$email_only_security" == true ]]; then
-    if [[ ! -f "${LOCAL_FILES:-/etc/ultimate-updater}/check-output" ]] ||
-      ! grep -q 'S' "${LOCAL_FILES:-/etc/ultimate-updater}/check-output"; then
-      return 0
-    fi
+  # EMAIL_ONLY_SECURITY: mail only when a target reports security updates.
+  # This used to grep check-output for an "S", which every summary contains
+  # ("Security updates: 0"), so the setting had no effect.
+  if [[ "$email_only_security" == true ]] && ! STATUS_MODEL_HAS_SECURITY_UPDATES "$status_file"; then
+    return 0
   fi
 
   case "$state" in
