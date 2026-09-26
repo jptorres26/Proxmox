@@ -110,7 +110,7 @@ for guest in freebsd debian fedora arch alpine centos; do
   fi
 done
 # Transactional upgrades on systemd guests survive a qemu-ga restart.
-grep -Fq 'durable 700 --timeout 5400 -- bash -c DEBIAN_FRONTEND=noninteractive apt-get -o x upgrade -y' "$WORK_DIR/debian.log"
+grep -Fq 'durable 700 --timeout 5400 -- bash -c DEBIAN_FRONTEND=noninteractive apt-get -o x --with-new-pkgs upgrade -y' "$WORK_DIR/debian.log"
 grep -Fq 'durable 700 --timeout 5400 -- bash -c dnf -y upgrade' "$WORK_DIR/fedora.log"
 grep -Fq 'durable 700 --timeout 5400 -- bash -c pacman -Syu --noconfirm' "$WORK_DIR/arch.log"
 grep -Fq 'durable 700 --timeout 5400 -- bash -c yum -y update' "$WORK_DIR/centos.log"

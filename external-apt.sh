@@ -143,7 +143,7 @@ if [ "$updater" = apt ]; then
   # The check is deliberately read-only.  It uses the package metadata
   # already cached on the external system; refreshing package metadata belongs
   # exclusively to the update path below.
-  apt_output=$(apt-get -s upgrade 2>&1) || {
+  apt_output=$(apt-get -s dist-upgrade 2>&1) || {  # what the update runs
     printf 'UU_RESULT|error|%s|%s|null|null|apt|APT_CHECK_FAILED|apt simulation failed\n' "${PRETTY_NAME:-unknown}" "${VERSION_ID:-}"
     exit 25
   }
