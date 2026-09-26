@@ -191,13 +191,21 @@ except ValueError as error:
 else:
     raise AssertionError("invalid BACKUP_MODE was accepted")
 assert server.validate_config_values({"SSH_PORT": 1, "LXC_START_DELAY": 0, "VM_START_DELAY": 999999, "KEEP_SNAPSHOTS": 100})["SSH_PORT"] == "1"
-for key in ("LXC_START_DELAY", "VM_START_DELAY", "KEEP_SNAPSHOTS"):
+for key in ("LXC_START_DELAY", "VM_START_DELAY"):
     try:
         server.validate_config_values({key: -1})
     except ValueError as error:
         assert "non-negative integer" in str(error)
     else:
         raise AssertionError(f"negative {key} was accepted")
+# Rotation must keep the snapshot taken for the current update.
+for value in (-1, 0):
+    try:
+        server.validate_config_values({"KEEP_SNAPSHOTS": value})
+    except ValueError as error:
+        assert "positive integer" in str(error)
+    else:
+        raise AssertionError(f"KEEP_SNAPSHOTS={value} was accepted")
 try:
     server.validate_config_values({"SSH_PORT": 65536})
 except ValueError as error:

@@ -627,6 +627,12 @@ READ_CONFIG () {
   KEEP_SNAPSHOT=$(awk -F'"' '/^KEEP_SNAPSHOTS=/ {print $2}' "$CONFIG_FILE")
   KEEP_SNAPSHOT="${KEEP_SNAPSHOT:-$(awk -F'"' '/^KEEP_SNAPSHOT=/ {print $2}' "$CONFIG_FILE")}"
   KEEP_SNAPSHOT="${KEEP_SNAPSHOT:-3}"
+  # Rotation keeps this many Update_* snapshots, including the one taken for
+  # the current run. Zero ("head -n -0" prints everything) would delete that
+  # protection before the update even starts.
+  [[ "$KEEP_SNAPSHOT" =~ ^[0-9]{1,6}$ ]] || KEEP_SNAPSHOT=3
+  KEEP_SNAPSHOT=$((10#$KEEP_SNAPSHOT))
+  ((KEEP_SNAPSHOT >= 1)) || KEEP_SNAPSHOT=1
   BACKUP=$(awk -F'"' '/^BACKUP=/ {print $2}' "$CONFIG_FILE")
   BACKUP_LXC_MP=$(awk -F'"' '/^BACKUP_LXC_MP=/ {print $2}' "$CONFIG_FILE")
   BACKUP_MODE=$(awk -F'"' '/^BACKUP_MODE=/ {print $2}' "$CONFIG_FILE")
@@ -725,6 +731,20 @@ CAPTURE_POST_UPDATE_STATUS() {
   return 0
 }
 
+# Delete this updater's Update_<date>_<time> snapshots beyond KEEP_SNAPSHOT,
+# oldest first. Snapshots created by users ("UpdateTest", "pre-Update", ...)
+# never match.
+ROTATE_UPDATE_SNAPSHOTS () {
+  local tool="$1" guest="$2" snapshot
+  local -a old_snapshots=()
+  mapfile -t old_snapshots < <("$tool" listsnapshot "$guest" 2>/dev/null |
+    awk '$2 ~ /^Update_[0-9]+_[0-9]+$/ {print $2}' | sort | head -n -"$KEEP_SNAPSHOT")
+  for snapshot in "${old_snapshots[@]}"; do
+    RUN_PROXMOX_COMMAND "$tool" delsnapshot "$guest" "$snapshot" ||
+      echo -e "${OR:-}⚠ Could not delete old snapshot $snapshot of $guest${CL:-}"
+  done
+}
+
 CONTAINER_BACKUP () {
   local snapshot_requested="$SNAPSHOT" snapshot_output
   local backup_requested="$BACKUP"
@@ -735,10 +755,7 @@ CONTAINER_BACKUP () {
         snapshot_output="$PROXMOX_CAPTURE_OUTPUT"
         echo -e "✅${GN:-} Snapshot created${CL:-}"
         echo -e "ℹ ${GN:-} Delete old snapshots${CL:-}"
-        LIST=$(pct listsnapshot "$CONTAINER" | sed -n "s/^.*Update\s*\(\S*\).*$/\1/p" | head -n -"$KEEP_SNAPSHOT")
-        for SNAPSHOTS in $LIST; do
-          pct delsnapshot "$CONTAINER" Update"$SNAPSHOTS" >/dev/null 2>&1
-        done
+        ROTATE_UPDATE_SNAPSHOTS pct "$CONTAINER"
       echo -e "✅${GN:-} Done${CL:-}"
       else
         snapshot_output="$PROXMOX_CAPTURE_OUTPUT"
@@ -788,10 +805,7 @@ VM_BACKUP () {
         snapshot_output="$PROXMOX_CAPTURE_OUTPUT"
         echo -e "✅${GN:-} Snapshot created${CL:-}"
         echo -e "ℹ ${GN:-} Delete old snapshot(s)${CL:-}"
-        LIST=$(qm listsnapshot "$VM" | sed -n "s/^.*Update\s*\(\S*\).*$/\1/p" | head -n -"$KEEP_SNAPSHOT")
-        for SNAPSHOTS in $LIST; do
-          qm delsnapshot "$VM" Update"$SNAPSHOTS" >/dev/null 2>&1
-        done
+        ROTATE_UPDATE_SNAPSHOTS qm "$VM"
       echo -e "✅${GN:-} Done${CL:-}"
       else
         snapshot_output="$PROXMOX_CAPTURE_OUTPUT"
