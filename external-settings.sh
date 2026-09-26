@@ -53,6 +53,9 @@ validate_value() {
   local key="$1" value="$2"
   external_config_key_allowed "$key" || return 2
   [[ "$value" != *$'\n'* && "$value" != *$'\r'* && ${#value} -le 512 ]] || return 2
+  # Filter lists never need quotes or backslashes, and they would have to be
+  # escaped in the remote config file.
+  [[ "$value" != *[\"\\]* ]] || return 2
 }
 
 settings_get() {
@@ -71,7 +74,7 @@ settings_get() {
 }
 
 settings_set() {
-  local target="$1" pair key value existing key_value content
+  local target="$1" pair key value existing key_value content escaped
   shift
   load_target "$target" || { printf 'External target is unavailable or invalid: %s\n' "$target" >&2; return 3; }
   [[ $# -le 4 ]] || { printf 'Too many External settings\n' >&2; return 2; }
@@ -88,12 +91,18 @@ settings_set() {
     if [[ ${requested[$key]+yes} == yes ]]; then
       key_value=${requested[$key]}
     else
-      key_value=$(printf '%s\n' "$existing" | awk -F= -v wanted="$key" '$1 == wanted {v=substr($0,index($0,"=")+1); gsub(/^"|"$/,"",v); print v; exit}')
+      # Unescape what an earlier write escaped; escapes used to pile up on
+      # every get/set round trip.
+      key_value=$(printf '%s\n' "$existing" | awk -F= -v wanted="$key" '$1 == wanted {
+        v = substr($0, index($0, "=") + 1); gsub(/^"|"$/, "", v)
+        gsub(/\\\\/, "\001", v); gsub(/\\"/, "\"", v); gsub(/\001/, "\\", v); print v; exit}')
     fi
     escaped=$(printf '%s' "$key_value" | sed 's/\\/\\\\/g; s/"/\\"/g')
     content+=$'\n'"$key=\"$escaped\""
   done
-  printf '%s\n' "$content" | remote_command "sudo -n $HELPER_PATH config-write" >/dev/null || {
+  # Root SSH users often have no sudo; the helper runs as root either way.
+  printf '%s\n' "$content" |
+    remote_command "if [ \"\$(id -u)\" -eq 0 ]; then $HELPER_PATH config-write; else sudo -n $HELPER_PATH config-write; fi" >/dev/null || {
     printf 'External settings write failed: target offline, denied, or rejected\n' >&2
     return 12
   }
