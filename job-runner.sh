@@ -26,10 +26,10 @@ usage() {
 }
 
 valid_target() {
-  case "$1" in
-    host|local-host|[A-Za-z0-9][A-Za-z0-9_.-]*) return 0 ;;
-    *) return 1 ;;
-  esac
+  # Guest IDs, External names, node names, host, local-host, all-systems.
+  # Targets become file names and state-file values: no separators or
+  # newlines.
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,159}$ ]]
 }
 
 valid_global_target() {
@@ -193,7 +193,15 @@ refresh_remote_target_status() {
   refresh_state=$(state_value "$ref_file" status_refresh)
   [[ "$refresh_state" == "done" || "$refresh_state" == "failed" ]] && return 0
   lock="$ref_file.refresh.lock"
-  mkdir "$lock" 2>/dev/null || return 0
+  # Older releases used a directory as the lock; it stayed behind whenever
+  # the refresh was killed. A flock is released when its holder exits.
+  [[ -d "$lock" ]] && rmdir -- "$lock" 2>/dev/null
+  local lock_fd
+  exec {lock_fd}>"$lock" || return 0
+  if ! flock -n "$lock_fd"; then
+    exec {lock_fd}>&-
+    return 0
+  fi
   workspace=$(state_value "$ref_file" workspace)
   if [[ "$target" =~ ^[0-9]+$ && -n "$workspace" && -x "$CHECK_CLI" ]]; then
     local_status_file=$(mktemp)
@@ -230,7 +238,7 @@ refresh_remote_target_status() {
     printf 'Remote post-update status refresh failed for %s (exit code %s).\n' \
       "$target" "$refresh_rc" >&2
   fi
-  rmdir "$lock" 2>/dev/null || true
+  exec {lock_fd}>&-
   return 0
 }
 
@@ -272,12 +280,19 @@ remote_state_line() {
 }
 
 sync_remote_last_update() {
-  local target="$1" state="$2" finished="$3" exit_code="$4"
+  local target="$1" state="$2" finished="$3" exit_code="$4" lock_fd rc
   [[ "$state" == completed || "$state" == failed || "$state" == interrupted ]] || return 0
   [[ "$target" =~ ^[0-9]+$ ]] || return 0
   [[ "$exit_code" =~ ^[0-9]+$ ]] || exit_code=1
-  python3 - "${UU_STATUS_MODEL_FILE:-/etc/ultimate-updater/status.json}" \
-    "$target" "$state" "$finished" "$exit_code" <<'PY'
+  [[ -f "$STATUS_MODEL_FILE" ]] || return 0
+  # Serialize with status-model.sh writers; an unlocked read-modify-write
+  # here could drop a concurrently recorded check result.
+  exec {lock_fd}>"${STATUS_MODEL_FILE}.lock" || return 0
+  if ! flock -x "$lock_fd"; then
+    exec {lock_fd}>&-
+    return 0
+  fi
+  python3 - "$STATUS_MODEL_FILE" "$target" "$state" "$finished" "$exit_code" <<'PY'
 import json
 import os
 import sys
@@ -300,11 +315,14 @@ if record is None:
     raise SystemExit(0)
 
 status = "success" if job_state == "completed" and exit_code == "0" else "failed"
-record["last_update"] = {
-    "status": status,
-    "timestamp": finished or None,
-    "exit_code": int(exit_code),
-}
+new = {"status": status, "timestamp": finished or None, "exit_code": int(exit_code)}
+current = record.get("last_update")
+if current == new:
+    raise SystemExit(0)  # list runs every few seconds; avoid rewriting the file
+if (isinstance(current, dict) and current.get("timestamp") and finished
+        and str(current["timestamp"]) > finished):
+    raise SystemExit(0)  # a newer (for example local) result already exists
+record["last_update"] = new
 directory = os.path.dirname(os.path.abspath(status_file)) or "."
 fd, temporary = tempfile.mkstemp(prefix=".status.", dir=directory, text=True)
 try:
@@ -322,6 +340,9 @@ except Exception:
         pass
     raise
 PY
+  rc=$?
+  exec {lock_fd}>&-
+  return "$rc"
 }
 
 target_running() {
@@ -411,7 +432,45 @@ cleanup_completed_jobs() {
       done
   fi
   rm -f -- "$index_file" 2>/dev/null || true
+  prune_remote_refs "$retention"
   return 0
+}
+
+remove_remote_ref() {
+  rm -f -- "$1" "$1.refresh.lock" 2>/dev/null || true
+  rmdir -- "$1.refresh.lock" 2>/dev/null || true
+}
+
+# Remote jobs are tracked by *.ref files only. Keep the newest finished ones
+# (status refresh done or failed) up to the retention limit, and drop refs
+# that never finished within a week (for example after a node was removed):
+# list_jobs asks the owner node about every ref over SSH.
+prune_remote_refs() {
+  local retention="$1" file registered epoch refresh now_epoch index_file total remove_count
+  [[ -d "$REMOTE_REF_DIR" ]] || return 0
+  now_epoch=$(date -u +%s)
+  index_file=$(mktemp "$JOB_STATE_DIR/.remote-retention.XXXXXX" 2>/dev/null) || return 0
+  shopt -s nullglob
+  for file in "$REMOTE_REF_DIR"/*.ref; do
+    registered=$(state_value "$file" registered_at)
+    epoch=$(date -u -d "$registered" +%s 2>/dev/null || true)
+    [[ "$epoch" =~ ^[0-9]+$ ]] || epoch=$(stat -c '%Y' "$file" 2>/dev/null || printf '0')
+    refresh=$(state_value "$file" status_refresh)
+    if [[ "$refresh" == "done" || "$refresh" == "failed" ]]; then
+      printf '%020d\t%s\n' "$epoch" "$file" >> "$index_file" || true
+    elif ((now_epoch - epoch > 7 * 86400)); then
+      remove_remote_ref "$file"
+    fi
+  done
+  total=$(wc -l < "$index_file" 2>/dev/null || printf '0')
+  remove_count=$((total - retention))
+  if ((remove_count > 0)); then
+    sort -n -k1,1 "$index_file" | head -n "$remove_count" |
+      while IFS=$'\t' read -r _ file; do
+        [[ -n "$file" ]] && remove_remote_ref "$file"
+      done
+  fi
+  rm -f -- "$index_file" 2>/dev/null || true
 }
 
 start_job() {
@@ -763,7 +822,7 @@ refresh_running_jobs() {
           if (( show_rc == 0 )) && [[ -n "$load_state" ]]; then
             started=$(state_value "$file" started_at)
             age_seconds=$(( $(date -u +%s) - $(date -u -d "$started" +%s 2>/dev/null || date -u +%s) ))
-            if (( age_seconds >= 30 )); then
+            if (( age_seconds >= 30 )) && [[ "$(state_value "$file" state)" == running ]]; then
               type=$(state_value "$file" type)
               write_state "$unit" "$target" interrupted "$started" "$(now)" '' "unit is $active_state" "${type:-update}" || true
             fi
@@ -773,7 +832,7 @@ refresh_running_jobs() {
           if (( show_rc == 0 )) && [[ -n "$load_state" && "$load_state" != loaded ]]; then
             started=$(state_value "$file" started_at)
             age_seconds=$(( $(date -u +%s) - $(date -u -d "$started" +%s 2>/dev/null || date -u +%s) ))
-            if (( age_seconds >= 30 )); then
+            if (( age_seconds >= 30 )) && [[ "$(state_value "$file" state)" == running ]]; then
               type=$(state_value "$file" type)
               write_state "$unit" "$target" interrupted "$started" "$(now)" '' "unit no longer active" "${type:-update}" || true
             fi
