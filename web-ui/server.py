@@ -13,6 +13,7 @@ import re
 import secrets
 import shlex
 import shutil
+import signal
 import socket
 import stat
 import ssl
@@ -167,8 +168,9 @@ def scheduler_validate(payload, schedule_id=None):
     legacy_frequency = payload.get("frequency")
     legacy_day = payload.get("day", "")
     enabled = payload.get("enabled", True)
-    if not isinstance(name, str) or not SCHEDULER_NAME_RE.fullmatch(name) or name.strip() != name:
-        raise ValueError("Name must be 1-80 characters without control characters")
+    if (not isinstance(name, str) or not SCHEDULER_NAME_RE.fullmatch(name) or name.strip() != name
+            or name.endswith("\\")):  # a trailing backslash continues the unit's Description= line
+        raise ValueError("Name must be 1-80 characters without control characters or a trailing backslash")
     if schedule_type not in SCHEDULER_TYPES:
         raise ValueError("Unknown scheduler action")
     if days is None:
@@ -1178,7 +1180,7 @@ body:has(#login-screen.open) .nav-scrim { display:none !important; }
   const modal=document.getElementById('schedule-modal'),form=document.getElementById('schedule-form'),list=document.getElementById('scheduler-list'),empty=document.getElementById('scheduler-empty'),message=document.getElementById('scheduler-message');
   if(!modal||!form)return;
   let schedules=[],schedulerTargets=[],selectedTargets=new Set();
-  const scheduleApi=async(path,options={})=>{const response=await fetch(path,{...options,headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken,...(options.headers||{})}});const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data?.error?.message||'Scheduler request failed.');return data};
+  const scheduleApi=(path,options={})=>api(path,options);
   const showScheduleMessage=(text,error=false)=>{message.hidden=!text;message.textContent=text||'';message.className=`management-message${error?' error':''}`};
   const formatScheduleTime=value=>{if(!value)return'—';const date=new Date(value);if(Number.isNaN(date.getTime()))return'—';const parts=new Intl.DateTimeFormat('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true}).formatToParts(date);const part=type=>parts.find(item=>item.type===type)?.value||'';return`${part('month')} ${part('day')} · ${part('hour')}:${part('minute')} ${part('dayPeriod')}`};
   const dayLabels={Mon:'Monday',Tue:'Tuesday',Wed:'Wednesday',Thu:'Thursday',Fri:'Friday',Sat:'Saturday',Sun:'Sunday'};
@@ -1231,6 +1233,31 @@ SECURITY_HEADERS = (
     ("Cross-Origin-Resource-Policy", "same-origin"),
     ("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()"),
 )
+
+
+def run_process(args, *, timeout, **options):
+    """subprocess.run() that stops the whole process group on timeout.
+
+    subprocess.run() kills only the direct child: ssh, pvesh, or qm started
+    by the CLI kept running after the request had timed out.
+    """
+    options.pop("check", None)
+    if options.pop("capture_output", False):
+        options["stdout"] = options["stderr"] = subprocess.PIPE
+    with subprocess.Popen(args, start_new_session=True, **options) as process:
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass  # a descendant left the group and still holds the pipe
+            raise
+        return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
 def is_ascii_number(value):
@@ -1774,7 +1801,7 @@ def resolve_filter_ids(only, exclude, tag_filter, eligible_ids=None, scope="upda
     environment["UU_FILTER_SCOPE"] = scope
     if eligible_ids is not None:
         environment["UU_FILTER_ELIGIBLE_IDS"] = " ".join(sorted(eligible_ids))
-    result = subprocess.run(
+    result = run_process(
         ["bash", "-c", script, "ultimate-updater-filter", str(tag_filter)],
         capture_output=True, text=True, timeout=10, env=environment, check=False,
     )
@@ -1916,7 +1943,7 @@ def validate_inventory_text(content, script):
         handle.write(content)
         candidate = Path(handle.name)
     try:
-        result = subprocess.run(["bash", str(script), str(candidate)], capture_output=True,
+        result = run_process(["bash", str(script), str(candidate)], capture_output=True,
                                 text=True, timeout=15, check=False)
     finally:
         candidate.unlink(missing_ok=True)
@@ -2036,12 +2063,20 @@ def locked_atomic_update(path, updater):
         updated = updater(content)
         mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o640
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as temp:
-            temp.write(updated)
-            temp.flush()
-            os.fsync(temp.fileno())
             temporary = Path(temp.name)
-        os.chmod(temporary, mode)
-        os.replace(temporary, path)
+            try:
+                temp.write(updated)
+                temp.flush()
+                os.fsync(temp.fileno())
+            except BaseException:
+                temporary.unlink(missing_ok=True)
+                raise
+        try:
+            os.chmod(temporary, mode)
+            os.replace(temporary, path)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
         directory_fd = os.open(path.parent, os.O_DIRECTORY)
         try:
             os.fsync(directory_fd)
@@ -2360,7 +2395,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             "env": environment,
         }
         options.update(encoding=encoding or "utf-8", errors="replace")
-        return subprocess.run(args, **options)
+        return run_process(args, **options)
 
     def jobs(self):
         runner = self.server.job_runner
@@ -2652,7 +2687,7 @@ class StatusHandler(BaseHTTPRequestHandler):
         if not target.get("host"):
             raise ValueError("No SSH configuration is available for this target.")
         try:
-            result = subprocess.run(self.ssh_command(target, remote_command),
+            result = run_process(self.ssh_command(target, remote_command),
                                     stdin=subprocess.DEVNULL, capture_output=True,
                                     text=True, timeout=timeout, check=False)
         except subprocess.TimeoutExpired:
@@ -2751,7 +2786,7 @@ class StatusHandler(BaseHTTPRequestHandler):
         inner = shlex.join(self.ssh_command(target, "true"))
         outer = self.ssh_command(owner_target, f"exec {inner}")
         try:
-            result = subprocess.run(outer, stdin=subprocess.DEVNULL,
+            result = run_process(outer, stdin=subprocess.DEVNULL,
                                     capture_output=True, text=True, timeout=12,
                                     check=False)
         except subprocess.TimeoutExpired:
@@ -2991,12 +3026,16 @@ class StatusHandler(BaseHTTPRequestHandler):
         self.server.scheduler_unit_dir.mkdir(parents=True, exist_ok=True)
         for path, content in ((service, service_text), (timer, timer_text)):
             with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as temporary:
-                temporary.write(content)
-                temporary.flush()
-                os.fsync(temporary.fileno())
                 temporary_path = Path(temporary.name)
-            os.chmod(temporary_path, 0o644)
-            os.replace(temporary_path, path)
+                try:
+                    temporary.write(content)
+                    temporary.flush()
+                    os.fsync(temporary.fileno())
+                    os.chmod(temporary_path, 0o644)
+                    os.replace(temporary_path, path)
+                except BaseException:
+                    temporary_path.unlink(missing_ok=True)
+                    raise
         self.scheduler_systemctl("daemon-reload")
         if schedule["enabled"]:
             self.scheduler_systemctl("enable", "--now", f"{unit}.timer")
@@ -3301,7 +3340,9 @@ class StatusHandler(BaseHTTPRequestHandler):
                 if job.get("remote"):
                     result = self.run_command([str(self.server.job_runner), "remote-log-full", unit], timeout=60, encoding="utf-8")
                 else:
-                    result = self.run_command(["journalctl", "-u", unit, "--no-pager", "-o", "cat"], timeout=60, encoding="utf-8")
+                    # Bounded: the whole journal of a long job was loaded into memory.
+                    result = self.run_command(["journalctl", "-u", unit, "-n", "100000", "--no-pager", "-o", "cat"],
+                                              timeout=60, encoding="utf-8")
                 if result.returncode or not result.stdout:
                     raise RuntimeError
                 filename = f"ultimate-updater-{unit}.log"
