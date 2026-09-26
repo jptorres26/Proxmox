@@ -1,5 +1,4 @@
 #!/bin/bash
-# shellcheck disable=SC2015,SC2086,SC2317
 
 ##########
 # Update #
@@ -663,7 +662,7 @@ READ_CONFIG () {
   EMAIL_USER=$(awk -F'"' '/^EMAIL_USER=/ {print $2}' "$CONFIG_FILE")
   EMAIL_USER="${EMAIL_USER:-root}"
   EMAIL_ONLY_ERROR=$(awk -F'"' '/^EMAIL_ONLY_ERROR=/ {print $2}' "$CONFIG_FILE")
-  EMAIL_SENDER=$(awk -F'"' '/^EMAIL_SENDER=/ {print $2}' $CONFIG_FILE)
+  EMAIL_SENDER=$(awk -F'"' '/^EMAIL_SENDER=/ {print $2; exit}' "$CONFIG_FILE")
   EMAIL_ONLY_ERROR="${EMAIL_ONLY_ERROR:-false}"
   EMAIL_SENDER="${EMAIL_SENDER:-$USER}"
   if declare -f STATUS_MODEL_EXPAND_SENDER >/dev/null 2>&1; then
@@ -848,34 +847,125 @@ VM_BACKUP () {
   fi
 }
 
-# User scripts
-USER_SCRIPTS () {
-  if [[ -d $USER_SCRIPTS/$CONTAINER ]]; then
-    echo -e "\n*** Run user scripts now ***\n"
-    USER_SCRIPTS_LS=$(ls $USER_SCRIPTS/"$CONTAINER")
-    pct exec "$CONTAINER" -- bash -c "mkdir -p $LOCAL_FILES/user-scripts"
-    for SCRIPT in $USER_SCRIPTS_LS; do
-      pct push "$CONTAINER" -- "$USER_SCRIPTS"/"$CONTAINER"/"$SCRIPT" "$LOCAL_FILES"/user-scripts/"$SCRIPT"
-      pct exec "$CONTAINER" -- bash -c "chmod +x $LOCAL_FILES/user-scripts/$SCRIPT && \
-                                        $LOCAL_FILES/user-scripts/$SCRIPT"
-    done
-    pct exec "$CONTAINER" -- bash -c "rm -rf $LOCAL_FILES || true"
-    echo -e "\n*** User scripts finished ***\n"
-  fi
+# Guest file transport for extras and user scripts. Files go to a private
+# temporary directory in the guest. They used to go to $LOCAL_FILES, and the
+# cleanup `rm -rf $LOCAL_FILES` wiped an Ultimate Updater installed in the
+# guest (for example a nested Proxmox VE); SSH guests also needed root.
+# The transport is lxc ($CONTAINER), ssh ($USER@$IP, $SSH_VM_PORT) or qga ($VM).
+GUEST_WORK_DIR_RE='^/tmp/ultimate-updater\.[A-Za-z0-9]+$'
+
+GUEST_WORKDIR () {  # GUEST_WORKDIR <transport>: create and print a work directory
+  local directory=""
+  case "$1" in
+    lxc) directory=$(pct exec "$CONTAINER" -- mktemp -d /tmp/ultimate-updater.XXXXXX) || return 1 ;;
+    ssh) directory=$(ssh -q -p "$SSH_VM_PORT" "$USER@$IP" 'mktemp -d /tmp/ultimate-updater.XXXXXX' </dev/null) || return 1 ;;
+    qga)
+      RUN_QEMU_COMMAND "$VM" -- mktemp -d /tmp/ultimate-updater.XXXXXX >/dev/null || return 1
+      directory=$QEMU_EXEC_STDOUT
+      ;;
+    *) return 1 ;;
+  esac
+  directory=${directory//[$'\r\n']/}
+  [[ "$directory" =~ $GUEST_WORK_DIR_RE ]] || return 1
+  printf '%s\n' "$directory"
 }
-USER_SCRIPTS_VM () {
-  if [[ -d $USER_SCRIPTS/$VM ]]; then
-    echo -e "\n*** Run user scripts now ***\n"
-    USER_SCRIPTS_LS=$(ls "$USER_SCRIPTS"/"$VM")
-    ssh -q -p "$SSH_VM_PORT" -tt "$USER"@"$IP" mkdir -p $LOCAL_FILES/user-scripts/
-    for SCRIPT in $USER_SCRIPTS_LS; do
-      scp "$USER_SCRIPTS"/"$VM"/"$SCRIPT" "$IP":$LOCAL_FILES/user-scripts/"$SCRIPT"
-      ssh -q -p "$SSH_VM_PORT" -tt "$USER"@"$IP" "chmod +x $LOCAL_FILES/user-scripts/$SCRIPT && \
-                $LOCAL_FILES/user-scripts/$SCRIPT"
-    done
-    ssh -q -p "$SSH_VM_PORT" -tt "$USER"@"$IP" "rm -rf $LOCAL_FILES || true"
-    echo -e "\n*** User scripts finished ***\n"
+
+# shellcheck disable=SC2016 # the sh -c scripts expand $1/$2 in the guest
+GUEST_COPY () {  # GUEST_COPY <transport> <local file> <guest file>
+  local host="$IP" data
+  case "$1" in
+    lxc) pct push "$CONTAINER" "$2" "$3" ;;
+    ssh)
+      [[ "$host" == *:* ]] && host="[$host]"
+      # scp takes the port as -P and needs the user; both were missing.
+      scp -q -P "$SSH_VM_PORT" "$2" "$USER@$host:$3"
+      ;;
+    qga)
+      data=$(base64 -w0 "$2") || return 1
+      RUN_QEMU_COMMAND "$VM" -- sh -c 'printf "%s" "$1" | base64 -d > "$2"' sh "$data" "$3" >/dev/null
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# shellcheck disable=SC2016 # the sh -c scripts expand $1/$2 in the guest
+GUEST_EXEC () {  # GUEST_EXEC <transport> <work dir> <script>: run with LOCAL_FILES=<work dir>
+  local quoted_dir quoted_script
+  case "$1" in
+    # Paths are passed as arguments, never re-parsed inside a command string.
+    lxc) pct exec "$CONTAINER" -- env LOCAL_FILES="$2" sh -c 'chmod +x "$1" && exec "$1"' sh "$3" ;;
+    ssh)
+      printf -v quoted_dir '%q' "$2"
+      printf -v quoted_script '%q' "$3"
+      ssh -q -p "$SSH_VM_PORT" -tt "$USER@$IP" "chmod +x $quoted_script && LOCAL_FILES=$quoted_dir $quoted_script"
+      ;;
+    qga)
+      RUN_QEMU_COMMAND "$VM" --timeout "$QGA_UPDATE_TIMEOUT" -- \
+        env LOCAL_FILES="$2" sh -c 'chmod +x "$1" && exec "$1"' sh "$3"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+GUEST_REMOVE () {  # GUEST_REMOVE <transport> <work dir>
+  [[ "$2" =~ $GUEST_WORK_DIR_RE ]] || return 1
+  case "$1" in
+    lxc) pct exec "$CONTAINER" -- rm -rf -- "$2" ;;
+    ssh) ssh -q -p "$SSH_VM_PORT" "$USER@$IP" "rm -rf -- $2" </dev/null ;;
+    qga) RUN_QEMU_COMMAND "$VM" -- rm -rf -- "$2" >/dev/null ;;
+    *) return 1 ;;
+  esac
+}
+
+# The user scripts of a guest: regular files in $USER_SCRIPTS/<id>, sorted,
+# without hidden files such as the .script-only marker.
+SCRIPT_ONLY_FILES () {
+  SCRIPT_FILES=()
+  while IFS= read -r -d '' SCRIPT_FILE; do
+    SCRIPT_FILES+=("$SCRIPT_FILE")
+  done < <(find "$1" -maxdepth 1 -type f ! -name '.*' -print0 2>/dev/null | sort -z)
+}
+
+# RUN_USER_SCRIPTS <transport> <guest id> <label>: copy and run every user
+# script; stops at the first failure and describes it in USER_SCRIPT_ERROR.
+RUN_USER_SCRIPTS () {
+  local transport="$1" id="$2" label="$3" work script_file script status=0
+  USER_SCRIPT_ERROR=""
+  SCRIPT_ONLY_FILES "$USER_SCRIPTS/$id"
+  [[ ${#SCRIPT_FILES[@]} -gt 0 ]] || return 0
+  if ! work=$(GUEST_WORKDIR "$transport"); then
+    USER_SCRIPT_ERROR="Could not prepare a user-script directory in $label"
+    return 1
   fi
+  for script_file in "${SCRIPT_FILES[@]}"; do
+    script="$work/${script_file##*/}"
+    if ! GUEST_COPY "$transport" "$script_file" "$script"; then
+      status=1
+      USER_SCRIPT_ERROR="Could not transfer user script ${script_file##*/} to $label"
+      break
+    fi
+    GUEST_EXEC "$transport" "$work" "$script"
+    status=$?
+    if [[ $status -ne 0 ]]; then
+      USER_SCRIPT_ERROR="User script ${script_file##*/} in $label failed (exit code $status)"
+      break
+    fi
+  done
+  GUEST_REMOVE "$transport" "$work" || true
+  return "$status"
+}
+
+# User scripts after a regular update (and its extras).
+USER_SCRIPTS_RUN () {  # USER_SCRIPTS_RUN <transport> <guest id> <label>
+  [[ -d "$USER_SCRIPTS/$2" ]] || return 0
+  echo -e "\n*** Run user scripts now ***\n"
+  if ! RUN_USER_SCRIPTS "$@"; then
+    ERROR_CODE=1
+    ID=$2
+    ERROR_MSG=$USER_SCRIPT_ERROR
+    ERROR
+  fi
+  echo -e "\n*** User scripts finished ***\n"
 }
 
 # Script-only mode is enabled by placing a .script-only marker next to the
@@ -883,129 +973,28 @@ USER_SCRIPTS_VM () {
 SCRIPT_ONLY_ENABLED () {
   [[ -f "$USER_SCRIPTS/$1/.script-only" ]]
 }
-SCRIPT_ONLY_FILES () {
-  SCRIPT_FILES=()
-  while IFS= read -r -d '' SCRIPT_FILE; do
-    SCRIPT_FILES+=("$SCRIPT_FILE")
-  done < <(find "$1" -maxdepth 1 -type f ! -name '.script-only' -print0 2>/dev/null | sort -z)
-}
-SCRIPT_ONLY_LXC () {
-  SCRIPT_ONLY_FILES "$USER_SCRIPTS/$CONTAINER"
+
+SCRIPT_ONLY_RUN () {  # SCRIPT_ONLY_RUN <transport> <guest id> <label> <transport label>
+  local status
+  SCRIPT_ONLY_FILES "$USER_SCRIPTS/$2"
   if [[ ${#SCRIPT_FILES[@]} -eq 0 ]]; then
-    echo -e "⚠ ${OR:-}Script-only mode enabled for LXC $CONTAINER, but no user scripts were found.${CL:-}"
-    SCRIPT_ONLY_ERROR="No user scripts found for LXC $CONTAINER"
+    echo -e "⚠ ${OR:-}Script-only mode enabled for $3, but no user scripts were found.${CL:-}"
+    SCRIPT_ONLY_ERROR="No user scripts found for $3"
     return 2
   fi
-  echo -e "\n${OR:-}Script-only mode enabled for LXC $CONTAINER${CL:-}"
+  echo -e "\n${OR:-}Script-only mode enabled for $3$4${CL:-}"
   echo -e "${OR:-}Skipping built-in OS update; running user scripts${CL:-}\n"
-  SCRIPT_SHELL=bash
-  [[ "$OS" == alpine ]] && SCRIPT_SHELL=ash
-  if ! pct exec "$CONTAINER" -- "$SCRIPT_SHELL" -c "mkdir -p $LOCAL_FILES/user-scripts"; then
-    SCRIPT_ONLY_ERROR="Could not prepare user-script directory in LXC $CONTAINER"
-    return 1
-  fi
-  SCRIPT_ONLY_STATUS=0
-  for SCRIPT_FILE in "${SCRIPT_FILES[@]}"; do
-    SCRIPT=$(basename "$SCRIPT_FILE")
-    if pct push "$CONTAINER" -- "$SCRIPT_FILE" "$LOCAL_FILES/user-scripts/$SCRIPT"; then
-      :
-    else
-      SCRIPT_ONLY_STATUS=$?
-      SCRIPT_ONLY_ERROR="Could not transfer user script $SCRIPT to LXC $CONTAINER (exit code $SCRIPT_ONLY_STATUS)"
-      break
-    fi
-    if [[ "$OS" == alpine ]]; then
-      pct exec "$CONTAINER" -- ash -c "chmod +x $LOCAL_FILES/user-scripts/$SCRIPT && $LOCAL_FILES/user-scripts/$SCRIPT"
-    else
-      pct exec "$CONTAINER" -- bash -c "chmod +x $LOCAL_FILES/user-scripts/$SCRIPT && $LOCAL_FILES/user-scripts/$SCRIPT"
-    fi
-    SCRIPT_ONLY_STATUS=$?
-    if [[ $SCRIPT_ONLY_STATUS -ne 0 ]]; then
-      SCRIPT_ONLY_ERROR="User script $SCRIPT in LXC $CONTAINER failed (exit code $SCRIPT_ONLY_STATUS)"
-      break
-    fi
-  done
-  pct exec "$CONTAINER" -- "$SCRIPT_SHELL" -c "rm -rf $LOCAL_FILES/user-scripts"
-  if [[ $SCRIPT_ONLY_STATUS -ne 0 ]]; then
-    return "$SCRIPT_ONLY_STATUS"
+  RUN_USER_SCRIPTS "$1" "$2" "$3"
+  status=$?
+  if [[ $status -ne 0 ]]; then
+    SCRIPT_ONLY_ERROR=$USER_SCRIPT_ERROR
+    return "$status"
   fi
   echo -e "\n${GN:-}Script-only user scripts finished${CL:-}\n"
 }
-SCRIPT_ONLY_SSH_VM () {
-  SCRIPT_ONLY_FILES "$USER_SCRIPTS/$VM"
-  if [[ ${#SCRIPT_FILES[@]} -eq 0 ]]; then
-    echo -e "⚠ ${OR:-}Script-only mode enabled for VM $VM, but no user scripts were found.${CL:-}"
-    SCRIPT_ONLY_ERROR="No user scripts found for VM $VM"
-    return 2
-  fi
-  echo -e "\n${OR:-}Script-only mode enabled for VM $VM via SSH${CL:-}"
-  echo -e "${OR:-}Skipping built-in OS update; running user scripts${CL:-}\n"
-  if ! ssh -q -p "$SSH_VM_PORT" -tt "$USER"@"$IP" mkdir -p "$LOCAL_FILES/user-scripts"; then
-    SCRIPT_ONLY_ERROR="Could not prepare user-script directory in VM $VM via SSH"
-    return 1
-  fi
-  SCRIPT_ONLY_STATUS=0
-  for SCRIPT_FILE in "${SCRIPT_FILES[@]}"; do
-    SCRIPT=$(basename "$SCRIPT_FILE")
-    if scp "$SCRIPT_FILE" "$IP":$LOCAL_FILES/user-scripts/"$SCRIPT"; then
-      :
-    else
-      SCRIPT_ONLY_STATUS=$?
-      SCRIPT_ONLY_ERROR="Could not transfer user script $SCRIPT to VM $VM (exit code $SCRIPT_ONLY_STATUS)"
-      break
-    fi
-    ssh -q -p "$SSH_VM_PORT" -tt "$USER"@"$IP" "chmod +x $LOCAL_FILES/user-scripts/$SCRIPT && $LOCAL_FILES/user-scripts/$SCRIPT"
-    SCRIPT_ONLY_STATUS=$?
-    if [[ $SCRIPT_ONLY_STATUS -ne 0 ]]; then
-      SCRIPT_ONLY_ERROR="User script $SCRIPT in VM $VM failed (exit code $SCRIPT_ONLY_STATUS)"
-      break
-    fi
-  done
-  ssh -q -p "$SSH_VM_PORT" -tt "$USER"@"$IP" "rm -rf $LOCAL_FILES/user-scripts"
-  [[ $SCRIPT_ONLY_STATUS -ne 0 ]] && return "$SCRIPT_ONLY_STATUS"
-  echo -e "\n${GN:-}Script-only user scripts finished${CL:-}\n"
-}
-SCRIPT_ONLY_QEMU_VM () {
-  SCRIPT_ONLY_FILES "$USER_SCRIPTS/$VM"
-  if [[ ${#SCRIPT_FILES[@]} -eq 0 ]]; then
-    echo -e "⚠ ${OR:-}Script-only mode enabled for VM $VM, but no user scripts were found.${CL:-}"
-    SCRIPT_ONLY_ERROR="No user scripts found for VM $VM"
-    return 2
-  fi
-  echo -e "\n${OR:-}Script-only mode enabled for VM $VM via QEMU Guest Agent${CL:-}"
-  echo -e "${OR:-}Skipping built-in OS update; running user scripts${CL:-}\n"
-  if ! RUN_QEMU_COMMAND "$VM" -- bash -c "mkdir -p $LOCAL_FILES/user-scripts" >/dev/null; then
-    SCRIPT_ONLY_ERROR="Could not prepare user-script directory in VM $VM via QEMU Guest Agent"
-    return 1
-  fi
-  SCRIPT_ONLY_STATUS=0
-  for SCRIPT_FILE in "${SCRIPT_FILES[@]}"; do
-    SCRIPT=$(basename "$SCRIPT_FILE")
-    if SCRIPT_DATA=$(base64 -w0 "$SCRIPT_FILE"); then
-      :
-    else
-      SCRIPT_ONLY_STATUS=$?
-      SCRIPT_ONLY_ERROR="Could not encode user script $SCRIPT for VM $VM (exit code $SCRIPT_ONLY_STATUS)"
-      break
-    fi
-    if RUN_QEMU_COMMAND "$VM" -- bash -c "printf '%s' '$SCRIPT_DATA' | base64 -d > '$LOCAL_FILES/user-scripts/$SCRIPT'" >/dev/null; then
-      :
-    else
-      SCRIPT_ONLY_STATUS=$?
-      SCRIPT_ONLY_ERROR="Could not transfer user script $SCRIPT to VM $VM via QEMU Guest Agent (exit code $SCRIPT_ONLY_STATUS)"
-      break
-    fi
-    RUN_QEMU_COMMAND "$VM" -- bash -c "chmod +x '$LOCAL_FILES/user-scripts/$SCRIPT' && '$LOCAL_FILES/user-scripts/$SCRIPT'"
-    SCRIPT_ONLY_STATUS=$?
-    if [[ $SCRIPT_ONLY_STATUS -ne 0 ]]; then
-      SCRIPT_ONLY_ERROR="User script $SCRIPT in VM $VM failed via QEMU Guest Agent (exit code $SCRIPT_ONLY_STATUS)"
-      break
-    fi
-  done
-  RUN_QEMU_COMMAND "$VM" -- bash -c "rm -rf $LOCAL_FILES/user-scripts" >/dev/null
-  [[ $SCRIPT_ONLY_STATUS -ne 0 ]] && return "$SCRIPT_ONLY_STATUS"
-  echo -e "\n${GN:-}Script-only user scripts finished${CL:-}\n"
-}
+SCRIPT_ONLY_LXC () { SCRIPT_ONLY_RUN lxc "$CONTAINER" "LXC $CONTAINER" ""; }
+SCRIPT_ONLY_SSH_VM () { SCRIPT_ONLY_RUN ssh "$VM" "VM $VM" " via SSH"; }
+SCRIPT_ONLY_QEMU_VM () { SCRIPT_ONLY_RUN qga "$VM" "VM $VM" " via QEMU Guest Agent"; }
 SCRIPT_ONLY_VM () {
   SCRIPT_ONLY_FILES "$USER_SCRIPTS/$VM"
   if [[ ${#SCRIPT_FILES[@]} -eq 0 ]]; then
@@ -1019,7 +1008,7 @@ SCRIPT_ONLY_VM () {
     USER="${USER:-root}"
     SSH_VM_PORT=$(awk -F'"' '/^SSH_VM_PORT=/ {print $2}' "$LOCAL_FILES/VMs/$VM")
     SSH_VM_PORT="${SSH_VM_PORT:-22}"
-    if ssh -o BatchMode=yes -o ConnectTimeout=5 -q -p "$SSH_VM_PORT" "$USER@$IP" exit >/dev/null 2>&1; then
+    if ssh -o BatchMode=yes -o ConnectTimeout=5 -q -p "$SSH_VM_PORT" "$USER@$IP" exit </dev/null >/dev/null 2>&1; then
       SCRIPT_ONLY_SSH_VM
       return
     fi
@@ -1042,26 +1031,30 @@ EXTRAS () {
     echo -e "\n${OR:-}--- Skip Extra Updates because of Headless Mode or user settings ---${CL:-}\n"
   else
     echo -e "\n${OR:-}--- Searching for extra updates ---${CL:-}"
-    if [[ "$SSH_CONNECTION" != true ]]; then
-      pct exec "$CONTAINER" -- bash -c "mkdir -p $LOCAL_FILES/"
-      pct push "$CONTAINER" -- $LOCAL_FILES/update-extras.sh $LOCAL_FILES/update-extras.sh
-      pct push "$CONTAINER" -- $LOCAL_FILES/update.conf $LOCAL_FILES/update.conf
-      pct exec "$CONTAINER" -- bash -c "LOCAL_FILES='$LOCAL_FILES' chmod +x '$LOCAL_FILES/update-extras.sh' && \
-                                        LOCAL_FILES='$LOCAL_FILES' '$LOCAL_FILES/update-extras.sh' && \
-                                        rm -rf $LOCAL_FILES || true"
-      USER_SCRIPTS
-    # Extras in VMS with SSH_CONNECTION
-    elif [[ "$USER" != root ]]; then
-      echo -e "${RD:-}--- You need root user for extra updates - maybe in later relaeses possible ---${CL:-}"
-    else
-      ssh -q -p "$SSH_VM_PORT" -tt "$USER"@"$IP" mkdir -p $LOCAL_FILES/
-      scp $LOCAL_FILES/update-extras.sh "$IP":$LOCAL_FILES/update-extras.sh
-      scp $LOCAL_FILES/update.conf "$IP":$LOCAL_FILES/update.conf
-      ssh -q -p "$SSH_VM_PORT" -tt "$USER"@"$IP" "LOCAL_FILES='$LOCAL_FILES' chmod +x '$LOCAL_FILES/update-extras.sh' && \
-                LOCAL_FILES='$LOCAL_FILES' '$LOCAL_FILES/update-extras.sh' && \
-                rm -rf $LOCAL_FILES || true"
-      USER_SCRIPTS_VM
+    local transport=lxc guest_id="$CONTAINER" label="LXC $CONTAINER" work
+    if [[ "$SSH_CONNECTION" == true ]]; then
+      transport=ssh guest_id="$VM" label="VM $VM"
     fi
+    if [[ "$transport" == ssh && "$USER" != root ]]; then
+      echo -e "${RD:-}--- Extra updates need the root user ---${CL:-}"
+    elif ! work=$(GUEST_WORKDIR "$transport"); then
+      ERROR_CODE=1
+      ID=$guest_id
+      ERROR_MSG="Could not prepare a directory for extra updates in $label"
+      ERROR
+    else
+      if GUEST_COPY "$transport" "$LOCAL_FILES/update-extras.sh" "$work/update-extras.sh" &&
+        GUEST_COPY "$transport" "$LOCAL_FILES/update.conf" "$work/update.conf"; then
+        GUEST_EXEC "$transport" "$work" "$work/update-extras.sh" || true
+      else
+        ERROR_CODE=1
+        ID=$guest_id
+        ERROR_MSG="Could not copy extra updates to $label"
+        ERROR
+      fi
+      GUEST_REMOVE "$transport" "$work" || true
+    fi
+    USER_SCRIPTS_RUN "$transport" "$guest_id" "$label"
     echo -e "${GN:-}---   Finished extra updates    ---${CL:-}"
     if [[ $WILL_STOP != true && $WELCOME_SCREEN != true ]]; then
       echo
@@ -1231,7 +1224,7 @@ WAIT_FOR_BOOTUP_SSH () {
   COUNT=1
   sleep "$SSH_START_DELAY_TIME"
   while [ $COUNT -le $MAX_RETRIES ]; do
-    if ssh -o BatchMode=yes -o ConnectTimeout=5 -q -p "$SSH_VM_PORT" "$USER@$IP" exit >/dev/null 2>&1; then
+    if ssh -o BatchMode=yes -o ConnectTimeout=5 -q -p "$SSH_VM_PORT" "$USER@$IP" exit </dev/null >/dev/null 2>&1; then
       echo -e "✅${GN:-} $VM reachable (tryout $COUNT)\n${CL:-}"
       break
     else
@@ -1423,26 +1416,26 @@ UPDATE_HOST () {
   return "${REMOTE_UPDATE_STATUS:-0}"
 }
 
-# shellcheck disable=SC2015
 UPDATE_HOST_ITSELF () {
+  NAME=$HOSTNAME
   echo -e "${OR:-}--- PVE UPDATE ---${CL:-}" && pveupdate || true
   if [[ "$HEADLESS" == true ]]; then
     echo -e "\n${OR:-}--- APT UPGRADE HEADLESS ---${CL:-}" && \
-    DEBIAN_FRONTEND=noninteractive apt-get "${DPKG_OPTIONS[@]}" dist-upgrade -y || { ERROR_CODE=$?; ID=$HOSTNAME; NAME=$HOSTNAME; ERROR_MSG=$(DEBIAN_FRONTEND=noninteractive apt-get "${DPKG_OPTIONS[@]}" dist-upgrade -y 2>&1); ERROR; }
+    RUN_STEP "$HOSTNAME" env DEBIAN_FRONTEND=noninteractive apt-get "${DPKG_OPTIONS[@]}" dist-upgrade -y
     if [[ $ERROR_CODE != "" ]]; then return; fi
   else
     if [[ "$INCLUDE_PHASED_UPDATES" != "true" ]]; then
       echo -e "\n${OR:-}--- APT UPGRADE ---${CL:-}" && \
-      apt-get "${DPKG_OPTIONS[@]}" dist-upgrade -y || { ERROR_CODE=$?; ID=$HOSTNAME; NAME=$HOSTNAME; ERROR_MSG=$(apt-get "${DPKG_OPTIONS[@]}" dist-upgrade -y 2>&1); ERROR; }
+      RUN_STEP "$HOSTNAME" apt-get "${DPKG_OPTIONS[@]}" dist-upgrade -y
       if [[ $ERROR_CODE != "" ]]; then return; fi
     else
       echo -e "\n${OR:-}--- APT UPGRADE ---${CL:-}" && \
-      apt-get "${DPKG_OPTIONS[@]}" -o APT::Get::Always-Include-Phased-Updates=true dist-upgrade -y || { ERROR_CODE=$?; ID=$HOSTNAME; NAME=$HOSTNAME; ERROR_MSG=$(apt-get "${DPKG_OPTIONS[@]}" -o APT::Get::Always-Include-Phased-Updates=true dist-upgrade -y 2>&1); ERROR; }
+      RUN_STEP "$HOSTNAME" apt-get "${DPKG_OPTIONS[@]}" -o APT::Get::Always-Include-Phased-Updates=true dist-upgrade -y
       if [[ $ERROR_CODE != "" ]]; then return; fi
     fi
   fi
   echo -e "\n${OR:-}--- APT CLEANING ---${CL:-}" && \
-  apt-get --purge autoremove -y || { ERROR_CODE=$?; ID=$HOSTNAME; NAME=$HOSTNAME; ERROR_MSG=$(apt-get --purge autoremove -y 2>&1); ERROR; }
+  RUN_STEP "$HOSTNAME" apt-get --purge autoremove -y
   if [[ $ERROR_CODE != "" ]]; then return; fi
   echo
   CHOST="true"
@@ -1604,74 +1597,73 @@ UPDATE_CONTAINER () {
     return 0
   fi
   # Run update
-  # shellcheck disable=SC2015
   if [[ "${OS,,}" =~ ubuntu|debian|devuan ]]; then
     echo -e "${OR:-}--- APT UPDATE ---${CL:-}"
     # Check APT in Container for Unifi before update
     if pct exec "$CONTAINER" -- bash -c "grep -rnw /etc/apt -e unifi >/dev/null 2>&1"; then
       UNIFI="true"
       # --allow-releaseinfo-change needed because Unifi regularly changes repository metadata between versions
-      pct exec "$CONTAINER" -- bash -c "apt-get update --allow-releaseinfo-change" || { ERROR_CODE=$?; ID=$CONTAINER; ERROR_MSG=$(pct exec "$CONTAINER" -- bash -c "apt-get update --allow-releaseinfo-change" 2>&1); ERROR; }
+      RUN_STEP "$CONTAINER" pct exec "$CONTAINER" -- bash -c "apt-get update --allow-releaseinfo-change"
     else
-      pct exec "$CONTAINER" -- bash -c "apt-get update" || { ERROR_CODE=$?; ID=$CONTAINER; ERROR_MSG=$(pct exec "$CONTAINER" -- bash -c "apt-get update" 2>&1); ERROR; }
+      RUN_STEP "$CONTAINER" pct exec "$CONTAINER" -- bash -c "apt-get update"
     fi
     if [[ $ERROR_CODE != "" ]]; then return; fi
     # Check END
     if [[ "$HEADLESS" == true ]]; then
       echo -e "\n${OR:-}--- APT UPGRADE HEADLESS ---${CL:-}"
-      pct exec "$CONTAINER" -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get $DPKG_OPTIONS_STRING dist-upgrade -y" || { ERROR_CODE=$?; ID=$CONTAINER; ERROR_MSG=$(pct exec "$CONTAINER" -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get $DPKG_OPTIONS_STRING dist-upgrade -y" 2>&1); ERROR; }
+      RUN_STEP "$CONTAINER" pct exec "$CONTAINER" -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get $DPKG_OPTIONS_STRING dist-upgrade -y"
       UNIFI=""
       if [[ $ERROR_CODE != "" ]]; then return; fi
     elif [[ "$UNIFI" == true ]]; then
       echo -e "\n${OR:-}--- APT UPGRADE HEADLESS (Unifi) ---${CL:-}"
       # Use --force-confdef/--force-confold to suppress Unifi interactive prompts
-      pct exec "$CONTAINER" -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get $DPKG_OPTIONS_STRING dist-upgrade -y" || { ERROR_CODE=$?; ID=$CONTAINER; ERROR_MSG=$(pct exec "$CONTAINER" -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get $DPKG_OPTIONS_STRING dist-upgrade -y" 2>&1); ERROR; }
+      RUN_STEP "$CONTAINER" pct exec "$CONTAINER" -- bash -c "DEBIAN_FRONTEND=noninteractive apt-get $DPKG_OPTIONS_STRING dist-upgrade -y"
       UNIFI=""
       if [[ $ERROR_CODE != "" ]]; then return; fi
     else
       echo -e "\n${OR:-}--- APT UPGRADE ---${CL:-}"
       if [[ "$INCLUDE_PHASED_UPDATES" != "true" ]]; then
-        pct exec "$CONTAINER" -- bash -c "apt-get $DPKG_OPTIONS_STRING dist-upgrade -y" || { ERROR_CODE=$?; ID=$CONTAINER; ERROR_MSG=$(pct exec "$CONTAINER" -- bash -c "apt-get $DPKG_OPTIONS_STRING dist-upgrade -y" 2>&1); ERROR; }
+        RUN_STEP "$CONTAINER" pct exec "$CONTAINER" -- bash -c "apt-get $DPKG_OPTIONS_STRING dist-upgrade -y"
         if [[ $ERROR_CODE != "" ]]; then return; fi
       else
-        pct exec "$CONTAINER" -- bash -c "apt-get $DPKG_OPTIONS_STRING -o APT::Get::Always-Include-Phased-Updates=true dist-upgrade -y" || { ERROR_CODE=$?; ID=$CONTAINER; ERROR_MSG=$(pct exec "$CONTAINER" -- bash -c "apt-get $DPKG_OPTIONS_STRING -o APT::Get::Always-Include-Phased-Updates=true dist-upgrade -y" 2>&1); ERROR; }
+        RUN_STEP "$CONTAINER" pct exec "$CONTAINER" -- bash -c "apt-get $DPKG_OPTIONS_STRING -o APT::Get::Always-Include-Phased-Updates=true dist-upgrade -y"
         if [[ $ERROR_CODE != "" ]]; then return; fi
       fi
     fi
       echo -e "\n${OR:-}--- APT CLEANING ---${CL:-}"
-      pct exec "$CONTAINER" -- bash -c "apt-get --purge autoremove -y" || { ERROR_CODE=$?; ID=$CONTAINER; ERROR_MSG=$(pct exec "$CONTAINER" -- bash -c "apt-get --purge autoremove -y" 2>&1); ERROR; }
+      RUN_STEP "$CONTAINER" pct exec "$CONTAINER" -- bash -c "apt-get --purge autoremove -y"
       if [[ $ERROR_CODE != "" ]]; then return; fi
-      pct exec "$CONTAINER" -- bash -c "apt-get autoclean -y" || { ERROR_CODE=$?; ID=$CONTAINER; ERROR_MSG=$(pct exec "$CONTAINER" -- bash -c "apt-get autoclean -y" 2>&1); ERROR; }
+      RUN_STEP "$CONTAINER" pct exec "$CONTAINER" -- bash -c "apt-get autoclean -y"
       if [[ $ERROR_CODE != "" ]]; then return; fi
       EXTRAS
       TRIM_FILESYSTEM
       UPDATE_CHECK
   elif [[ "$OS" =~ fedora ]]; then
     echo -e "\n${OR:-}--- DNF UPGRATE ---${CL:-}"
-    pct exec "$CONTAINER" -- bash -c "dnf -y upgrade" || { ERROR_CODE=$?; ID=$CONTAINER; ERROR_MSG=$(pct exec "$CONTAINER" -- bash -c "dnf -y upgrade" 2>&1); ERROR; }
+    RUN_STEP "$CONTAINER" pct exec "$CONTAINER" -- bash -c "dnf -y upgrade"
     if [[ $ERROR_CODE != "" ]]; then return; fi
     echo -e "\n${OR:-}--- DNF CLEANING ---${CL:-}"
-    pct exec "$CONTAINER" -- bash -c "dnf -y autoremove" || { ERROR_CODE=$?; ID=$CONTAINER; ERROR_MSG=$(pct exec "$CONTAINER" -- bash -c "dnf -y autoremove" 2>&1); ERROR; }
+    RUN_STEP "$CONTAINER" pct exec "$CONTAINER" -- bash -c "dnf -y autoremove"
     if [[ $ERROR_CODE != "" ]]; then return; fi
     EXTRAS
     TRIM_FILESYSTEM
     UPDATE_CHECK
   elif [[ "$OS" =~ archlinux ]]; then
     echo -e "${OR:-}--- PACMAN UPDATE ---${CL:-}"
-    pct exec "$CONTAINER" -- bash -c "$PACMAN_ENVIRONMENT pacman -Syu --noconfirm" || { ERROR_CODE=$?; ID=$CONTAINER; ERROR_MSG=$(pct exec "$CONTAINER" -- bash -c "$PACMAN_ENVIRONMENT pacman -Syu --noconfirm" 2>&1); ERROR; }
+    RUN_STEP "$CONTAINER" pct exec "$CONTAINER" -- bash -c "$PACMAN_ENVIRONMENT pacman -Syu --noconfirm"
     if [[ $ERROR_CODE != "" ]]; then return; fi
     EXTRAS
     TRIM_FILESYSTEM
     UPDATE_CHECK
   elif [[ "$OS" =~ alpine ]]; then
     echo -e "${OR:-}--- APK UPDATE ---${CL:-}"
-    pct exec "$CONTAINER" -- ash -c "apk -U upgrade" || { ERROR_CODE=$?; ID=$CONTAINER; ERROR_MSG=$(pct exec "$CONTAINER" -- ash -c "apk -U upgrade" 2>&1); ERROR; }
+    RUN_STEP "$CONTAINER" pct exec "$CONTAINER" -- ash -c "apk -U upgrade"
     if [[ $ERROR_CODE != "" ]]; then return; fi
     if [[ "$WILL_STOP" != true ]]; then echo; fi
     echo
   elif [[ "$OS" =~ centos ]]; then
     echo -e "${OR:-}--- YUM UPDATE ---${CL:-}"
-    pct exec "$CONTAINER" -- bash -c "yum -y update" || { ERROR_CODE=$?; ID=$CONTAINER; ERROR_MSG=$(pct exec "$CONTAINER" -- bash -c "yum -y update" 2>&1); ERROR; }
+    RUN_STEP "$CONTAINER" pct exec "$CONTAINER" -- bash -c "yum -y update"
     if [[ $ERROR_CODE != "" ]]; then return; fi
     EXTRAS
     TRIM_FILESYSTEM
@@ -1758,7 +1750,6 @@ VM_UPDATE_START () {
 }
 
 # VM Update
-# shellcheck disable=SC2015
 UPDATE_VM () {
   VM=$1
   NAME=$(qm config "$VM" | grep 'name:' | sed 's/name:\s*//')
@@ -1788,12 +1779,12 @@ UPDATE_VM () {
   fi
   # Read SSH config file - check how update is possible
   if [[ -f $LOCAL_FILES/VMs/"$VM" ]]; then
-    IP=$(awk -F'"' '/^IP=/ {print $2}' $LOCAL_FILES/VMs/"$VM")
-    USER=$(awk -F'"' '/^USER=/ {print $2}' $LOCAL_FILES/VMs/"$VM")
+    IP=$(awk -F'"' '/^IP=/ {print $2; exit}' "$LOCAL_FILES/VMs/$VM")
+    USER=$(awk -F'"' '/^USER=/ {print $2; exit}' "$LOCAL_FILES/VMs/$VM")
     USER="${USER:-root}"
-    SSH_VM_PORT=$(awk -F'"' '/^SSH_VM_PORT=/ {print $2}' $LOCAL_FILES/VMs/"$VM")
+    SSH_VM_PORT=$(awk -F'"' '/^SSH_VM_PORT=/ {print $2; exit}' "$LOCAL_FILES/VMs/$VM")
     SSH_VM_PORT="${SSH_VM_PORT:-22}"
-    SSH_START_DELAY_TIME=$(awk -F'"' '/^SSH_START_DELAY_TIME=/ {print $2}' $LOCAL_FILES/VMs/"$VM")
+    SSH_START_DELAY_TIME=$(awk -F'"' '/^SSH_START_DELAY_TIME=/ {print $2; exit}' "$LOCAL_FILES/VMs/$VM")
     SSH_START_DELAY_TIME="${SSH_START_DELAY_TIME:-45}"
     INTERNAL_SSH_RESOLVE_VM "$VM" "${IP:-}" "${USER:-root}" "${SSH_VM_PORT:-22}" || return 1
     [[ "${INTERNAL_SSH_ENABLED:-true}" == true ]] || return 1
@@ -1822,13 +1813,13 @@ UPDATE_VM () {
       # Free-BSD
       if [[ $KERNEL =~ FreeBSD && $FREEBSD_UPDATES == true ]]; then
         echo -e "${OR:-}--- PKG UPDATE ---${CL:-}"
-        ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" pkg update || { ERROR_CODE=$?; ID=$VM; ERROR_MSG=$(ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" pkg update 2>&1); ERROR; }
+        RUN_STEP "$VM" ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" pkg update
         if [[ $ERROR_CODE != "" ]]; then return; fi
         echo -e "\n${OR:-}--- PKG UPGRADE ---${CL:-}"
-        ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" pkg upgrade -y || { ERROR_CODE=$?; ID=$VM; ERROR_MSG=$(ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" pkg upgrade -y 2>&1); ERROR; }
+        RUN_STEP "$VM" ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" pkg upgrade -y
         if [[ $ERROR_CODE != "" ]]; then return; fi
         echo -e "\n${OR:-}--- PKG CLEANING ---${CL:-}"
-        ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" pkg autoremove -y || { ERROR_CODE=$?; ID=$VM; ERROR_MSG=$(ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" pkg autoremove -y 2>&1); ERROR; }
+        RUN_STEP "$VM" ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" pkg autoremove -y
         if [[ $ERROR_CODE != "" ]]; then return; fi
         echo
         return
@@ -1848,49 +1839,49 @@ UPDATE_VM () {
           UPDATE_USER="sudo "
         fi
         echo -e "${OR:-}--- APT UPDATE ---${CL:-}"
-        ssh -q -p "$SSH_VM_PORT" -tt "$USER"@"$IP" "$UPDATE_USER"apt-get update -y || { ERROR_CODE=$?; ID=$VM; ERROR_MSG=$(ssh -q -p "$SSH_VM_PORT" -tt "$USER"@"$IP" "$UPDATE_USER"apt-get update -y 2>&1); ERROR; }
+        RUN_STEP "$VM" ssh -q -p "$SSH_VM_PORT" -tt "$USER"@"$IP" "$UPDATE_USER"apt-get update -y
         if [[ $ERROR_CODE != "" ]]; then return; fi
         echo -e "\n${OR:-}--- APT UPGRADE ---${CL:-}"
         if [[ "$INCLUDE_PHASED_UPDATES" != "true" ]]; then
-          ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" "$UPDATE_USER" apt-get "${DPKG_OPTIONS[@]}" upgrade -y || { ERROR_CODE=$?; ID=$VM; ERROR_MSG=$(ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" "$UPDATE_USER" apt-get "${DPKG_OPTIONS[@]}" upgrade -y 2>&1); ERROR; }
+          RUN_STEP "$VM" ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" "$UPDATE_USER" apt-get "${DPKG_OPTIONS[@]}" upgrade -y
           if [[ $ERROR_CODE != "" ]]; then return; fi
         else
-          ssh -q -p "$SSH_VM_PORT" -tt "$USER"@"$IP" "$UPDATE_USER" apt-get "${DPKG_OPTIONS[@]}" -o APT::Get::Always-Include-Phased-Updates=true upgrade -y || { ERROR_CODE=$?; ID=$VM; ERROR_MSG=$(ssh -q -p "$SSH_VM_PORT" -tt "$USER"@"$IP" "$UPDATE_USER" apt-get "${DPKG_OPTIONS[@]}" -o APT::Get::Always-Include-Phased-Updates=true upgrade -y 2>&1); ERROR; }
+          RUN_STEP "$VM" ssh -q -p "$SSH_VM_PORT" -tt "$USER"@"$IP" "$UPDATE_USER" apt-get "${DPKG_OPTIONS[@]}" -o APT::Get::Always-Include-Phased-Updates=true upgrade -y
           if [[ $ERROR_CODE != "" ]]; then return; fi
         fi
         echo -e "\n${OR:-}--- APT CLEANING ---${CL:-}"
-        ssh -q -p "$SSH_VM_PORT" -tt "$USER"@"$IP" "$UPDATE_USER" "apt-get --purge autoremove -y" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG=$(ssh -q -p "$SSH_VM_PORT" -tt "$USER"@"$IP" "$UPDATE_USER" apt-get --purge autoremove -y 2>&1); ERROR; }
+        RUN_STEP "$VM" ssh -q -p "$SSH_VM_PORT" -tt "$USER"@"$IP" "$UPDATE_USER" "apt-get --purge autoremove -y"
         if [[ $ERROR_CODE != "" ]]; then return; fi
-        ssh -q -p "$SSH_VM_PORT" -tt "$USER"@"$IP" "$UPDATE_USER" "apt-get autoclean -y" || { ERROR_CODE=$?; ID=$VM; ERROR_MSG=$(ssh -q -p "$SSH_VM_PORT" -tt "$USER"@"$IP" "$UPDATE_USER" apt-get autoclean -y 2>&1); ERROR; }
+        RUN_STEP "$VM" ssh -q -p "$SSH_VM_PORT" -tt "$USER"@"$IP" "$UPDATE_USER" "apt-get autoclean -y"
         if [[ $ERROR_CODE != "" ]]; then return; fi
         EXTRAS
         UPDATE_CHECK
       # Fedora
       elif [[ "$OS" =~ Fedora ]]; then
         echo -e "\n${OR:-}--- DNF UPGRADE ---${CL:-}"
-        ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" dnf -y upgrade || { ERROR_CODE=$?; ID=$VM; ERROR_MSG=$(ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" dnf -y upgrade 2>&1); ERROR; }
+        RUN_STEP "$VM" ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" dnf -y upgrade
         if [[ $ERROR_CODE != "" ]]; then return; fi
         echo -e "\n${OR:-}--- DNF CLEANING ---${CL:-}"
-        ssh -q -p "$SSH_VM_PORT" "$USER"@"$IP" dnf -y --purge autoremove || { ERROR_CODE=$?; ID=$VM; ERROR_MSG=$(ssh -q -p "$SSH_VM_PORT" "$USER"@"$IP" dnf -y --purge autoremove 2>&1); ERROR; }
+        RUN_STEP "$VM" ssh -q -p "$SSH_VM_PORT" "$USER"@"$IP" dnf -y --purge autoremove
         if [[ $ERROR_CODE != "" ]]; then return; fi
         EXTRAS
         UPDATE_CHECK
       # Arch
       elif [[ "$OS" =~ Arch ]]; then
         echo -e "${OR:-}--- PACMAN UPDATE ---${CL:-}"
-        ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" pacman -Syu --noconfirm || { ERROR_CODE=$?; ID=$VM; ERROR_MSG=$(ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" pacman -Syu --noconfirm 2>&1); ERROR; }
+        RUN_STEP "$VM" ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" pacman -Syu --noconfirm
         if [[ $ERROR_CODE != "" ]]; then return; fi
         EXTRAS
         UPDATE_CHECK
       # Alpine
       elif [[ "$OS" =~ Alpine ]]; then
         echo -e "${OR:-}--- APK UPDATE ---${CL:-}"
-        ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" apk -U upgrade || { ERROR_CODE=$?; ID=$VM; ERROR_MSG=$(ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" apk -U upgrade 2>&1); ERROR; }
+        RUN_STEP "$VM" ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" apk -U upgrade
         if [[ $ERROR_CODE != "" ]]; then return; fi
       # Cent OS
       elif [[ "$OS" =~ CentOS ]]; then
         echo -e "${OR:-}--- YUM UPDATE ---${CL:-}"
-        ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" yum -y update || { ERROR_CODE=$?; ID=$VM; ERROR_MSG=$(ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" yum -y update 2>&1); ERROR; }
+        RUN_STEP "$VM" ssh -tt -q -p "$SSH_VM_PORT" "$USER"@"$IP" yum -y update
         if [[ $ERROR_CODE != "" ]]; then return; fi
         EXTRAS
         UPDATE_CHECK
@@ -1912,7 +1903,6 @@ UPDATE_VM () {
 }
 
 # QEMU
-# shellcheck disable=SC2015
 UPDATE_VM_QEMU () {
   local qga_ready=false
   echo -e " ▶${GN:-} Try to connect via QEMU${CL:-}"
@@ -2072,7 +2062,7 @@ UPDATE_VM_QEMU_WINDOWS () {
 READ_CONFIG
 
 # Debug
-DEBUG=$(awk -F'"' '/^DEBUG=/ {print $2}' $CONFIG_FILE)
+DEBUG=$(awk -F'"' '/^DEBUG=/ {print $2; exit}' "$CONFIG_FILE")
 if [[ "$DEBUG" == true ]]; then
   set -x
 fi
@@ -2090,7 +2080,7 @@ OUTPUT_TO_FILE () {
   if [[ -f "/etc/update-motd.d/01-welcome-screen" && -x "/etc/update-motd.d/01-welcome-screen" ]]; then
     WELCOME_SCREEN=true
     if [[ "$RICM" != true ]]; then
-      touch $LOCAL_FILES/check-output
+      touch "$LOCAL_FILES/check-output"
     fi
   fi
 }
@@ -2121,15 +2111,37 @@ CLEAN_LOGFILE () {
 }
 
 # Error handling
+# Run one update step for a target: RUN_STEP <target-id> <command...>
+# The output is shown and logged once; on failure its last lines become the
+# error message. Failed steps used to run a second time only to capture that
+# message, repeating a failed dist-upgrade with its prompts hidden. Always
+# returns 0 (callers test ERROR_CODE), so EXIT_ON_ERROR's set -e keeps its
+# meaning.
+RUN_STEP () {
+  local id="$1" output rc=0
+  shift
+  output=$(mktemp "${TMPDIR:-/tmp}/ultimate-updater-step.XXXXXX" 2>/dev/null) || output=""
+  { "$@" 2>&1 | tee -- "${output:-/dev/null}"; rc=${PIPESTATUS[0]}; } || true
+  if [[ "$rc" -ne 0 ]]; then
+    ERROR_CODE=$rc
+    ID=$id
+    ERROR_MSG=""
+    [[ -n "$output" ]] && ERROR_MSG=$(tail -n 20 -- "$output" | tr -d '\r')
+    ERROR_MSG=${ERROR_MSG:-"exit code $rc: $*"}
+    ERROR
+  fi
+  [[ -z "$output" ]] || rm -f -- "$output"
+  return 0
+}
+
 ERROR () {
   UPDATE_FAILURE=true
   if [[ "${CCONTAINER:-}" == true && "${ID:-}" =~ ^[0-9]+$ ]] &&
     declare -f STATUS_MODEL_UPDATE_RESULT >/dev/null 2>&1; then
     STATUS_MODEL_UPDATE_RESULT "$ID" failed "${ERROR_CODE:-1}" || true
   fi
-  echo -e "$ID : $NAME" | tee -a "$ERROR_LOG_FILE" >/dev/null 2>&1
-  echo -e "Error code:   $ERROR_CODE" | tee -a "$ERROR_LOG_FILE" >/dev/null 2>&1
-  echo -e "Error output: $ERROR_MSG\n" | tee -a "$ERROR_LOG_FILE" >/dev/null 2>&1
+  # printf, not echo -e: names and messages come from guests.
+  printf '%s : %s\nError code:   %s\nError output: %s\n\n' "$ID" "$NAME" "$ERROR_CODE" "$ERROR_MSG" >> "$ERROR_LOG_FILE" 2>/dev/null
   echo
 }
 

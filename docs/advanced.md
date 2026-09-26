@@ -31,9 +31,18 @@ runner.
 ## User scripts
 
 Place guest-specific scripts in
-`/etc/ultimate-updater/scripts.d/<VMID>/`. Avoid spaces in filenames. An empty
-`.script-only` marker runs those scripts instead of the built-in package
-manager for that guest. Snapshot/backup and lifecycle safety still apply.
+`/etc/ultimate-updater/scripts.d/<VMID>/`. They run after the guest's update
+in name order; hidden files are ignored. An empty `.script-only` marker runs
+those scripts instead of the built-in package manager for that guest.
+Snapshot/backup and lifecycle safety still apply.
+
+Each run copies the scripts (and, for extra updates, `update-extras.sh` and
+`update.conf`) into a new `/tmp/ultimate-updater.XXXXXX` directory in the
+guest, runs them with `LOCAL_FILES` set to that directory, and removes the
+directory afterwards. Scripts need a shebang line. A failing script stops the
+remaining scripts of that guest and is reported as an error. Over SSH the
+scripts run as the configured user; over the QEMU Guest Agent each script may
+take up to `UU_QGA_UPDATE_TIMEOUT` seconds.
 
 ## Welcome screen and cached version information
 
