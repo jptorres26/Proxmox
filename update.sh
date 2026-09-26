@@ -2125,7 +2125,11 @@ UPDATE_VM_QEMU_WINDOWS () {
   fi
 
   echo -e "${OR:-}--- WINDOWS UPDATE ---${CL:-}"
-  QEMU_GUEST_EXEC "$VM" --timeout 180 -- powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "$encoded"
+  # Downloading and installing a cumulative update takes far longer than a
+  # package query: use the update timeout, and keep a VM that is still
+  # installing from being shut down.
+  QEMU_GUEST_EXEC "$VM" --timeout "$QGA_UPDATE_TIMEOUT" -- powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "$encoded"
+  QGA_NOTE_UNFINISHED_JOB
   if [[ $QEMU_EXEC_TRANSPORT_RC -ne 0 || "$QEMU_EXEC_EXITCODE" -ne 0 ]]; then
     ERROR_CODE=${QEMU_EXEC_EXITCODE:-1}
     ID=$VM
@@ -2136,7 +2140,6 @@ UPDATE_VM_QEMU_WINDOWS () {
   fi
 
   result=$(printf '%s\n' "$QEMU_EXEC_STDOUT" | tr -d '\r' | tail -n 1)
-  # shellcheck disable=SC2034
   IFS='|' read -r marker update_status processed reboot message <<< "$result"
   if [[ "$marker" != UU_WINDOWS || "$update_status" != ok || ! "$processed" =~ ^[0-9]+$ || ("$reboot" != true && "$reboot" != false) ]]; then
     ERROR_CODE=1
@@ -2147,7 +2150,7 @@ UPDATE_VM_QEMU_WINDOWS () {
     return
   fi
 
-  echo "Windows updates processed: $processed"
+  echo "Windows updates processed: $processed${message:+ ($message)}"
   declare -f STATUS_MODEL_UPDATE_RESULT >/dev/null 2>&1 && STATUS_MODEL_UPDATE_RESULT "$VM" success 0 || true
   if [[ "$reboot" == true ]]; then
     echo -e "${OR:-}Reboot required; no automatic reboot was performed.${CL:-}"

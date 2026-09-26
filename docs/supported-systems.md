@@ -28,6 +28,16 @@ normal/security split for this updater, so the UI and notifications show
 does not disable a read-only check; it blocks the actual FreeBSD/pfSense
 update operation.
 
+## Windows
+
+Windows VMs are updated through QGA with the built-in Windows Update Agent,
+without a PowerShell module. The update step accepts the license terms of
+the updates it installs, as Microsoft's unattended sample does, and skips
+updates that can ask for user input; the result names how many were
+skipped. The step waits up to `UU_QGA_UPDATE_TIMEOUT` seconds (default
+3600). A VM whose installation is still running then is not shut down. No
+automatic reboot is performed.
+
 ## VM requirements
 
 QGA VMs need both `qm agent <VMID> ping` and the required `guest-exec`
