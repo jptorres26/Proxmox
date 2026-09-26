@@ -69,7 +69,7 @@ for marker in \
   'CENTRAL_REMOTE_END node='; do
   grep -Fq "$marker" "$ROOT_DIR/check-updates.sh"
 done
-grep -Fq 'bash -s -- host' "$ROOT_DIR/check-updates.sh"
+grep -Fq "bash '\$remote_check_dir/check-updates.sh' host </dev/null" "$ROOT_DIR/check-updates.sh"
 # shellcheck disable=SC2016 # the literal shell fragment is the assertion target.
 grep -Fq '"$LOCAL_FILES/update.conf" "$HOST:$LOCAL_FILES/update.conf"' "$ROOT_DIR/check-updates.sh"
 grep -Fq 'DEBUG:-false' "$ROOT_DIR/check-updates.sh"

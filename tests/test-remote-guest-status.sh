@@ -8,7 +8,7 @@ WEB="$ROOT_DIR/web-ui/server.py"
 # Remote guest checks must use the current central scripts and an isolated
 # artifact directory, not an installed check-updates.sh on the remote node.
 grep -Fq 'remote_check_dir="/tmp/ultimate-updater-check-target-' "$SOURCE"
-grep -Fq 'bash -s -- %q %q' "$SOURCE"
+grep -Fq 'bash %q %q %q </dev/null' "$SOURCE"
 grep -Fq 'INTERNAL_SSH_FILE=%q INTERNAL_SSH_CONFIG_FILE=%q' "$SOURCE"
 grep -Fq 'QGA_EXEC_SCRIPT=%q' "$SOURCE"
 # shellcheck disable=SC2016 # assertion intentionally matches literal shell syntax.

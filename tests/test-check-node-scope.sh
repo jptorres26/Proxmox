@@ -12,14 +12,17 @@ grep -Fq 'REMOTE_NODE_USER="${INTERNAL_SSH_USER:-root}"' "$ROOT_DIR/ultimate-upd
 grep -Fq '"$user@$host:$remote_config"' "$ROOT_DIR/ultimate-updater"
 grep -Fq '"$user@$host" "$command"' "$ROOT_DIR/ultimate-updater"
 grep -Fq 'LOCAL_FILES=%q CONFIG_FILE=%q TAG_FILTER_FILE=%q' "$ROOT_DIR/ultimate-updater"
-grep -Fq 'bash -s -- node-host >/dev/null 2>&1' "$ROOT_DIR/ultimate-updater"
+grep -Fq 'bash %q node-host </dev/null >/dev/null 2>&1' "$ROOT_DIR/ultimate-updater"
+grep -Fq '"$remote_check_dir/check-updates.sh"' "$ROOT_DIR/ultimate-updater"
 grep -Fq '"$remote_check_dir"' "$ROOT_DIR/ultimate-updater"
 if grep -Fq 'install -m 0640 '\''$remote_config'\'' '\''$LOCAL_FILES/update.conf'\''' "$ROOT_DIR/ultimate-updater"; then
   echo 'remote check-node still writes the central config into /etc on the target' >&2
   exit 1
 fi
-grep -Fq 'bash -s -- host' "$ROOT_DIR/check-updates.sh"
-if grep -Fq 'bash %q node-host' "$ROOT_DIR/ultimate-updater"; then
+grep -Fq "bash '\$remote_check_dir/check-updates.sh' host </dev/null" "$ROOT_DIR/check-updates.sh"
+# The executed script is the copy streamed from the central node into the
+# isolated work directory, never a possibly outdated installed one.
+if grep -Eq 'bash (/etc/ultimate-updater|\$LOCAL_FILES|"\$LOCAL_FILES)/check-updates.sh' "$ROOT_DIR/ultimate-updater"; then
   echo 'remote check-node still depends on an installed remote check script' >&2
   exit 1
 fi

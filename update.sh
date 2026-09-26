@@ -1361,16 +1361,20 @@ UPDATE_HOST () {
       scp "$LOCAL_FILES/qga-guest-exec.sh" "$HOST":$LOCAL_FILES/qga-guest-exec.sh
     fi
   fi
+  local remote_mode="-c host"
   if [[ "$HEADLESS" == true ]]; then
-    ssh -q -p "$SSH_PORT" "$HOST" 'bash -s' < "$0" -- "-s -c host"
-    REMOTE_UPDATE_STATUS=$?
+    remote_mode="-s -c host"
   elif [[ "$WELCOME_SCREEN" == true ]]; then
-    ssh -q -p "$SSH_PORT" "$HOST" 'bash -s' < "$0" -- "-c -w host"
-    REMOTE_UPDATE_STATUS=$?
-  else
-    ssh -q -p "$SSH_PORT" "$HOST" 'bash -s' < "$0" -- "-c host"
-    REMOTE_UPDATE_STATUS=$?
+    remote_mode="-c -w host"
   fi
+  # Stage the script on the node instead of streaming it into `bash -s`.
+  # A bash reading its script from stdin shares that stream with its
+  # children: any ssh to a VM or package prompt consumed the rest of the
+  # script, including the final status handling, so failed node updates
+  # were reported as successful.
+  ssh -q -p "$SSH_PORT" "$HOST" \
+    "f=\$(mktemp /tmp/ultimate-updater-run.XXXXXX) || exit 1; cat > \"\$f\" || { rm -f -- \"\$f\"; exit 1; }; bash \"\$f\" $remote_mode </dev/null; rc=\$?; rm -f -- \"\$f\"; exit \"\$rc\"" < "$0"
+  REMOTE_UPDATE_STATUS=$?
   if [[ "$HOST" != "$START_HOST" ]]; then
     ssh -q -p "$SSH_PORT" "$HOST" "if [[ -f $LOCAL_FILES/update.conf.uu-backup ]]; then mv -f $LOCAL_FILES/update.conf.uu-backup $LOCAL_FILES/update.conf; else rm -f $LOCAL_FILES/update.conf; fi"
   fi
