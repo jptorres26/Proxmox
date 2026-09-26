@@ -40,6 +40,7 @@ write_status 2
 [[ "$(send true)" -eq 1 ]]
 
 # Legacy fallback path in check-updates.sh.
+# shellcheck disable=SC2016 # literal source text
 grep -Fq 'if [[ "$EMAIL_ONLY_SECURITY" != true || "$SECURITY_UPDATES_AVALABLE" == true ]]; then' \
   "$ROOT_DIR/check-updates.sh"
 

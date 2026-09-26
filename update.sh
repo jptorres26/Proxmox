@@ -1828,7 +1828,14 @@ UPDATE_VM () {
       # Run SSH Update
       SSH_CONNECTION="true"
       KERNEL=$(qm guest cmd "$VM" get-osinfo 2>/dev/null | grep kernel-version || true)
-      OS=$(ssh -q -p "$SSH_VM_PORT" "$USER"@"$IP" hostnamectl 2>/dev/null | grep System || true)
+      # FreeBSD/pfSense reachable only over SSH (no guest agent) and Alpine
+      # (no hostnamectl) were never recognized here.
+      if [[ "$(ssh -q -p "$SSH_VM_PORT" "$USER"@"$IP" 'uname -s' </dev/null 2>/dev/null)" == FreeBSD ]]; then
+        KERNEL=FreeBSD
+      fi
+      OS=$(ssh -q -p "$SSH_VM_PORT" "$USER"@"$IP" 'cat /etc/os-release' </dev/null 2>/dev/null |
+        awk -F= '$1 == "PRETTY_NAME" {gsub(/^"|"$/, "", $2); print $2; exit}' || true)
+      [[ -n "$OS" ]] || OS=$(ssh -q -p "$SSH_VM_PORT" "$USER"@"$IP" hostnamectl </dev/null 2>/dev/null | grep System || true)
       # Free-BSD
       if [[ $KERNEL =~ FreeBSD && $FREEBSD_UPDATES == true ]]; then
         echo -e "${OR:-}--- PKG UPDATE ---${CL:-}"
