@@ -293,7 +293,11 @@ REMOTE_UPDATE
   remote_script=${remote_script//__EXTERNAL_HELPER_PATH__/$EXTERNAL_HELPER_PATH}
   remote_script=${remote_script//__EXTERNAL_HELPER_VERSION__/$EXTERNAL_HELPER_VERSION}
   remote_script=${remote_script//__EXTERNAL_TARGET_NAME__/$EXTERNAL_TARGET}
-  RUN_SSH_IDENTITY_FILE="$EXTERNAL_IDENTITY_FILE" RUN_SSH_COMMAND "$EXTERNAL_HOST" "$EXTERNAL_PORT" "$EXTERNAL_USER" 'bash -s' <<< "$remote_script"
+  # The helper runs apt-get update, dist-upgrade, autoremove and autoclean in
+  # one session. The generic 120 s SSH timeout killed long upgrades, and the
+  # closing session could interrupt dpkg on the target.
+  RUN_SSH_IDENTITY_FILE="$EXTERNAL_IDENTITY_FILE" UU_SSH_COMMAND_TIMEOUT="${UU_EXTERNAL_UPDATE_TIMEOUT:-14400}" \
+    RUN_SSH_COMMAND "$EXTERNAL_HOST" "$EXTERNAL_PORT" "$EXTERNAL_USER" 'bash -s' <<< "$remote_script"
 }
 
 update_target() {
