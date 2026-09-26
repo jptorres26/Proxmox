@@ -74,7 +74,19 @@ validated atomically. Updates require browser confirmation.
 
 Normal Proxmox installations authenticate the local administrator through PAM.
 The service is root-owned because the existing CLI and job runner need local
-permissions. Useful service commands are:
+permissions.
+
+- Only `root` can sign in, with the host's PAM `login` service. Proxmox
+  two-factor authentication (TOTP/WebAuthn realms) is **not** applied to this
+  login; restrict access to the management network accordingly.
+- Each client may fail five logins per minute; login results are logged to
+  the service journal (`journalctl -u ultimate-updater-web`), for example for
+  fail2ban.
+- Sessions expire after 8 hours without activity and at the latest 12 hours
+  after sign-in. The session cookie is `HttpOnly`, `SameSite=Strict`, and
+  `Secure` when HTTPS is active.
+
+Useful service commands are:
 
 ```bash
 systemctl status ultimate-updater-web
