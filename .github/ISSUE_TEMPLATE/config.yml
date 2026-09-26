@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Questions and discussion
+    url: https://github.com/BassT23/Proxmox/discussions/60
+    about: Ask usage questions in the Q&A discussion.
+  - name: Discord
+    url: https://discord.gg/nVpUg6BKn8
+    about: Chat with the community and the maintainer.
