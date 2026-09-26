@@ -56,7 +56,7 @@ if WEB_UI_CONFIG_FILE="$CONFIG" WEB_UI_PORT_OWN_PIDS='' "$ROOT_DIR/web-ui-port.s
 fi
 kill -0 "$LISTENER_PID"
 before=$(sha256sum "$CONFIG")
-if WEB_UI_CONFIG_FILE="$CONFIG" WEB_UI_PORT_OWN_PIDS='' "$ROOT_DIR/web-ui-port.sh" set 18765 >/dev/null 2>&1; then
+if WEB_UI_CONFIG_FILE="$CONFIG" WEB_UI_PORT_OWN_PIDS='' "$ROOT_DIR/web-ui-port.sh" set "$LISTENER_PORT" >/dev/null 2>&1; then
   echo 'port setter accepted a foreign listener' >&2
   exit 1
 fi

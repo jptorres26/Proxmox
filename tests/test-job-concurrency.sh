@@ -47,26 +47,26 @@ if second=$("${runner[@]}" start "$WORK_DIR/update.sh" 191 2>&1); then
   exit 1
 fi
 grep -Fq 'A job is already running for target 191' <<< "$second"
-grep -Fq "^state=running$" "$WORK_DIR/jobs/$first_unit.state"
+grep -Fxq 'state=running' "$WORK_DIR/jobs/$first_unit.state"
 
 if check_conflict=$("${runner[@]}" start-check 191 "$WORK_DIR/check.sh" target 2>&1); then
   echo 'check/update conflict was accepted' >&2
   exit 1
 fi
 grep -Fq 'A job is already running for target 191' <<< "$check_conflict"
-grep -Fq "^state=running$" "$WORK_DIR/jobs/$first_unit.state"
+grep -Fxq 'state=running' "$WORK_DIR/jobs/$first_unit.state"
 
 other=$("${runner[@]}" start-check 230 "$WORK_DIR/check.sh" target)
 grep -Fq 'Check job started' <<< "$other"
 other_unit=$(awk '/^Job:/{print $2}' <<< "$other")
-grep -Fq "^state=running$" "$WORK_DIR/jobs/$other_unit.state"
+grep -Fxq 'state=running' "$WORK_DIR/jobs/$other_unit.state"
 
 if global_conflict=$("${runner[@]}" start-global "$WORK_DIR/update.sh" 2>&1); then
   echo 'global update conflict was accepted' >&2
   exit 1
 fi
 grep -Fq 'A job is already running; the full update was not started' <<< "$global_conflict"
-grep -Fq "^state=running$" "$WORK_DIR/jobs/$first_unit.state"
+grep -Fxq 'state=running' "$WORK_DIR/jobs/$first_unit.state"
 
 # An unavailable systemd query must not convert an active state file to
 # interrupted merely because stale detection cannot prove the unit is gone.
