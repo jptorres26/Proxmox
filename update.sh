@@ -63,6 +63,15 @@ if [[ -f "$LOCAL_FILES/status-model.sh" ]]; then
   # shellcheck disable=SC1090,SC1091
   . "$LOCAL_FILES/status-model.sh"
 fi
+if ! declare -F UU_SEND_MAIL >/dev/null; then
+  # Installations without status-model.sh; called from the EXIT trap.
+  # shellcheck disable=SC2329
+  UU_SEND_MAIL() {
+    local from="$2"
+    [[ "$from" == "\$USER" ]] && from=$(id -un)
+    mail -s "$3" -r "$from" -- "$1"
+  }
+fi
 INSTALLED_BRANCH=$(awk -F'"' '/^USED_BRANCH=/ {print $2}' "$CONFIG_FILE")
 case "$INSTALLED_BRANCH" in
   master|beta|develop) ;;
@@ -671,7 +680,7 @@ READ_CONFIG () {
   EMAIL_ONLY_ERROR=$(awk -F'"' '/^EMAIL_ONLY_ERROR=/ {print $2}' "$CONFIG_FILE")
   EMAIL_SENDER=$(awk -F'"' '/^EMAIL_SENDER=/ {print $2; exit}' "$CONFIG_FILE")
   EMAIL_ONLY_ERROR="${EMAIL_ONLY_ERROR:-false}"
-  EMAIL_SENDER="${EMAIL_SENDER:-$USER}"
+  EMAIL_SENDER="${EMAIL_SENDER:-\$USER}"
   if declare -f STATUS_MODEL_EXPAND_SENDER >/dev/null 2>&1; then
     EMAIL_SENDER=$(STATUS_MODEL_EXPAND_SENDER "$EMAIL_SENDER")
   fi
@@ -2284,7 +2293,7 @@ EXIT () {
         echo
         CLEAN_LOGFILE
         if [[ "${SELF_UPDATE_RUN:-false}" != true && "${UU_DEFER_UPDATE_MAIL:-false}" != true ]]; then
-          UPDATE_MAIL_BODY | mail -a 'Content-Type: text/plain; charset=UTF-8' -a 'Content-Transfer-Encoding: 8bit' -r "$EMAIL_SENDER" -s "Ultimate Updater summary - $HOSTNAME" "$EMAIL_USER" 2>/dev/null || true
+          UPDATE_MAIL_BODY | UU_SEND_MAIL "$EMAIL_USER" "$EMAIL_SENDER" "Ultimate Updater summary - $HOSTNAME" 2>/dev/null || true
         fi
       else
         echo -e "${GN:-}✅ Finished.${CL:-}\n"
@@ -2292,7 +2301,7 @@ EXIT () {
         CLEAN_LOGFILE
         if [[ "$EMAIL_ONLY_ERROR" != true ]]; then
           if [[ "${SELF_UPDATE_RUN:-false}" != true && "${UU_DEFER_UPDATE_MAIL:-false}" != true ]]; then
-            UPDATE_MAIL_BODY | mail -a 'Content-Type: text/plain; charset=UTF-8' -a 'Content-Transfer-Encoding: 8bit' -r "$EMAIL_SENDER" -s "Ultimate Updater" "$EMAIL_USER" 2>/dev/null || true
+            UPDATE_MAIL_BODY | UU_SEND_MAIL "$EMAIL_USER" "$EMAIL_SENDER" "Ultimate Updater" 2>/dev/null || true
           fi
         fi
       fi
@@ -2304,7 +2313,7 @@ EXIT () {
       "$LOCAL_FILES/exit/error.sh"
       CLEAN_LOGFILE
       if [[ "${SELF_UPDATE_RUN:-false}" != true && "${UU_DEFER_UPDATE_MAIL:-false}" != true ]]; then
-        UPDATE_MAIL_BODY | mail -a 'Content-Type: text/plain; charset=UTF-8' -a 'Content-Transfer-Encoding: 8bit' -r "$EMAIL_SENDER" -s "Ultimate Updater summary - $HOSTNAME" "$EMAIL_USER" 2>/dev/null
+        UPDATE_MAIL_BODY | UU_SEND_MAIL "$EMAIL_USER" "$EMAIL_SENDER" "Ultimate Updater summary - $HOSTNAME" 2>/dev/null
       fi
     fi
   fi

@@ -28,9 +28,10 @@ fi
 # ioBroker
 if [[ -d "/opt/iobroker" && $IOBROKER == true ]]; then
   echo -e "\n*** Updating ioBroker ***\n"
-  echo "*** Stop ioBroker ***" &&  sudo -u iobroker bash -c "iob stop" && echo
-  echo "*** Update/Upgrade ioBroker ***" && sudo -u iobroker bash -c "iob update" && sudo -u iobroker bash -c "iob upgrade -y" && sudo -u iobroker bash -c "iob upgrade self -y" && echo
-  echo "*** Start ioBroker ***" && sudo -u iobroker bash -c "iob start" && echo
+  # runuser (util-linux) is always present; sudo is often missing in LXC.
+  echo "*** Stop ioBroker ***" &&  runuser -u iobroker -- iob stop && echo
+  echo "*** Update/Upgrade ioBroker ***" && runuser -u iobroker -- iob update && runuser -u iobroker -- iob upgrade -y && runuser -u iobroker -- iob upgrade self -y && echo
+  echo "*** Start ioBroker ***" && runuser -u iobroker -- iob start && echo
   if [[ -d "/opt/iobroker/iobroker-data/radar2.admin" ]]; then
     for tool in arp-scan node arp hcitool hciconfig l2ping; do
       tool_path=$(command -v -- "$tool") || continue

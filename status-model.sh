@@ -510,6 +510,35 @@ PY
   return "$result"
 }
 
+# Send a plain-text UTF-8 mail: UU_SEND_MAIL <to> <from> <subject> < body
+# <to> may list several addresses separated by commas or spaces; <from> may
+# be "Name <address>". sendmail (postfix on Proxmox VE) takes the headers
+# directly. mail(1) was called with `-a 'Header: value'`, which only
+# bsd-mailx understands: with GNU mailutils or s-nail `-a` attaches a file,
+# the call failed, and `|| true` hid it, so no notification was sent.
+UU_SEND_MAIL() {
+  local to="$1" from="$2" subject="$3" envelope recipient sendmail="${UU_SENDMAIL:-/usr/sbin/sendmail}"
+  local address='^[^-[:space:][:cntrl:]"<>,][^[:space:][:cntrl:]"<>,]*$'
+  local -a recipients=()
+  IFS=', ' read -r -a recipients <<< "$to"
+  ((${#recipients[@]})) || return 1
+  for recipient in "${recipients[@]}"; do
+    [[ "$recipient" =~ $address ]] || return 1
+  done
+  envelope=$from
+  [[ "$from" =~ \<([^\<\>]+)\>[[:space:]]*$ ]] && envelope=${BASH_REMATCH[1]}
+  [[ "$envelope" =~ $address && "$from" != *[[:cntrl:]]* ]] || return 1
+  if [[ -x "$sendmail" ]]; then
+    {
+      printf 'From: %s\nTo: %s\nSubject: %s\nMIME-Version: 1.0\n' "$from" "${recipients[*]}" "$subject"
+      printf 'Content-Type: text/plain; charset=UTF-8\nContent-Transfer-Encoding: 8bit\n\n'
+      cat
+    } | "$sendmail" -oi -f "$envelope" -- "${recipients[@]}"
+  else
+    mail -s "$subject" -r "$envelope" -- "${recipients[@]}"
+  fi
+}
+
 # Succeed when any target in the status file reports security updates.
 STATUS_MODEL_HAS_SECURITY_UPDATES() {
   python3 - "$1" <<'PY'
@@ -540,7 +569,7 @@ STATUS_MODEL_SEND_NOTIFICATION() {
   email_no_updates=$(awk -F'"' '/^EMAIL_NO_UPDATES=/ {print $2}' "$config_file" 2>/dev/null)
   email_only_security=$(awk -F'"' '/^EMAIL_ONLY_SECURITY=/ {print $2}' "$config_file" 2>/dev/null)
   email_user="${email_user:-root}"
-  email_sender="${email_sender:-$USER}"
+  email_sender="${email_sender:-\$USER}"
   email_sender=$(STATUS_MODEL_EXPAND_SENDER "$email_sender")
   email_no_updates="${email_no_updates:-false}"
   email_only_security="${email_only_security:-false}"
@@ -560,13 +589,11 @@ STATUS_MODEL_SEND_NOTIFICATION() {
 
   case "$state" in
     updates|issues)
-      printf '%s\n' "$body" | mail -a 'Content-Type: text/plain; charset=UTF-8' -a 'Content-Transfer-Encoding: 8bit' -r "$email_sender" \
-        -s "Ultimate Updater summary - $HOSTNAME" "$email_user" || true
+      printf '%s\n' "$body" | UU_SEND_MAIL "$email_user" "$email_sender" "Ultimate Updater summary - $HOSTNAME" || true
       ;;
     current)
       if [[ "$email_no_updates" == true ]]; then
-        echo "No updates found during search" | mail -a 'Content-Type: text/plain; charset=UTF-8' -a 'Content-Transfer-Encoding: 8bit' -r "$email_sender" \
-          -s "Ultimate Updater" "$email_user" || true
+        echo "No updates found during search" | UU_SEND_MAIL "$email_user" "$email_sender" "Ultimate Updater" || true
       fi
       ;;
     empty)
@@ -600,9 +627,7 @@ STATUS_MODEL_SEND_UPDATE_NOTIFICATION() {
   body=${notification#*$'\n'}
 
   [[ "$email_only_error" == true && "$state" != issues ]] && return 0
-  printf '%s\n' "$body" | mail -a 'Content-Type: text/plain; charset=UTF-8' \
-    -a 'Content-Transfer-Encoding: 8bit' -r "$email_sender" \
-    -s "Ultimate Updater summary - $HOSTNAME" "$email_user" || true
+  printf '%s\n' "$body" | UU_SEND_MAIL "$email_user" "$email_sender" "Ultimate Updater summary - $HOSTNAME" || true
 }
 
 # Expand only the documented sender placeholder. Config is never evaluated as
