@@ -27,7 +27,7 @@ send() {  # send <EMAIL_ONLY_SECURITY>
   printf 'EMAIL_USER="root"\nEMAIL_SENDER="root"\nEMAIL_NO_UPDATES="false"\nEMAIL_ONLY_SECURITY="%s"\n' "$1" \
     > "$WORK_DIR/update.conf"
   : > "$WORK_DIR/mail.log"
-  PATH="$WORK_DIR/bin:$PATH" LOCAL_FILES="$WORK_DIR" bash -c '
+  UU_SENDMAIL="$WORK_DIR/no-sendmail" PATH="$WORK_DIR/bin:$PATH" LOCAL_FILES="$WORK_DIR" bash -c '
     source "$1/status-model.sh"
     STATUS_MODEL_SEND_NOTIFICATION "$2/status.json" "$2/update.conf"' _ "$ROOT_DIR" "$WORK_DIR"
   wc -l < "$WORK_DIR/mail.log"

@@ -315,7 +315,7 @@ READ_WRITE_CONFIG () {
   EMAIL_NO_UPDATES=$(awk -F'"' '/^EMAIL_NO_UPDATES=/ {print $2}' $CONFIG_FILE)
   EMAIL_ONLY_SECURITY=$(awk -F'"' '/^EMAIL_ONLY_SECURITY=/ {print $2}' $CONFIG_FILE)
   EMAIL_USER="${EMAIL_USER:-root}"
-  EMAIL_SENDER="${EMAIL_SENDER:-$USER}"
+  EMAIL_SENDER="${EMAIL_SENDER:-\$USER}"
   if declare -f STATUS_MODEL_EXPAND_SENDER >/dev/null 2>&1; then
     EMAIL_SENDER=$(STATUS_MODEL_EXPAND_SENDER "$EMAIL_SENDER")
   fi
@@ -1742,10 +1742,10 @@ EXIT () {
         if [[ $(stat -c%s "$LOCAL_FILES/mail-output") -gt 46 ]]; then
           # Both branches used to send the same mail.
           if [[ "$EMAIL_ONLY_SECURITY" != true || "$SECURITY_UPDATES_AVALABLE" == true ]]; then
-            mail -a 'Content-Type: text/plain; charset=UTF-8' -a 'Content-Transfer-Encoding: 8bit' -r "$EMAIL_SENDER" -s "Ultimate Updater summary - $HOSTNAME" "$EMAIL_USER" < "$LOCAL_FILES"/mail-output
+            UU_SEND_MAIL "$EMAIL_USER" "$EMAIL_SENDER" "Ultimate Updater summary - $HOSTNAME" < "$LOCAL_FILES"/mail-output
           fi
         elif [[ "$EMAIL_NO_UPDATES" == true ]]; then
-          echo "No updates found during search" | mail -a 'Content-Type: text/plain; charset=UTF-8' -a 'Content-Transfer-Encoding: 8bit' -r "$EMAIL_SENDER" -s "Ultimate Updater" "$EMAIL_USER"
+          echo "No updates found during search" | UU_SEND_MAIL "$EMAIL_USER" "$EMAIL_SENDER" "Ultimate Updater"
         fi
       fi
     fi
