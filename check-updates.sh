@@ -274,7 +274,7 @@ ARGUMENTS () {
       host)
         COMMAND=true
         OUTPUT_TO_FILE
-        if [[ "$WITH_HOST" == true ]]; then CHECK_HOST_ITSELF; fi
+        if [[ "$WITH_HOST" == true ]]; then CHECK_HOST_ITSELF || CHECK_FAILURE=1; fi
         # An explicit node check is a host observation, even when the
         # global configuration enables guest checks.  The configured guest
         # scope belongs to the full/automatic check path only.
@@ -529,7 +529,7 @@ PY
 HOST_CHECK_START () {
   for HOST in $HOSTS; do
     if HOST_IS_LOCAL "$HOST"; then
-      CHECK_HOST_ITSELF
+      CHECK_HOST_ITSELF || CHECK_FAILURE=1
       if [[ "$WITH_LXC" == true ]]; then CONTAINER_CHECK_START; fi
       if [[ "$WITH_VM" == true ]]; then VM_CHECK_START; fi
     else
@@ -800,7 +800,13 @@ CHECK_HOST_ITSELF () {
   local APT_OUTPUT
   # Same command as the update (dist-upgrade): `-s upgrade` hid held-back
   # packages such as a new proxmox-kernel pulled in by proxmox-default-kernel.
-  APT_OUTPUT=$(apt-get -s dist-upgrade)
+  # A failed simulation (for example a held dpkg lock) used to read as
+  # "0 updates, ok".
+  if ! APT_OUTPUT=$(apt-get -s dist-upgrade); then
+    STATUS_MODEL_RECORD "host:$STATUS_HOST_NAME" host local true "" apt null null error CHECK_COMMAND_FAILED \
+      "apt-get -s dist-upgrade failed on the host" "$STATUS_HOST_NAME" "$STATUS_HOST_NAME"
+    return 1
+  fi
   # Keep the log and status model on the same package-manager snapshot.  The
   # shared helper owns the security classification and disjoint split.
   READ_APT_UPDATE_COUNTS "$APT_OUTPUT"
@@ -1405,7 +1411,11 @@ CHECK_VM () {
   fi
   if [[ ${OS,,} =~ ubuntu|mint|kali|debian|devuan ]]; then
     RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "apt-get update" >/dev/null 2>&1
-    APT_OUTPUT=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "apt-get -s --with-new-pkgs upgrade")
+    if ! APT_OUTPUT=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "apt-get -s --with-new-pkgs upgrade"); then
+      STATUS_MODEL_RECORD "$VM" vm ssh true "$OS" apt null null error CHECK_COMMAND_FAILED \
+        "apt-get simulation failed for VM $VM" "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME"
+      return 1
+    fi
     READ_APT_UPDATE_COUNTS "$APT_OUTPUT"
     if RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" stat /var/run/reboot-required.pkgs >/dev/null 2>&1; then
       REBOOT_REQUIRED=true
@@ -1804,7 +1814,7 @@ if [[ "$COMMAND" != true && "$RDU" == true ]]; then
 elif [[ "$COMMAND" != true ]]; then
   OUTPUT_TO_FILE
   if [[ "$MODE" =~ Cluster ]]; then HOST_CHECK_START; else
-    if [[ "$WITH_HOST" == true ]]; then CHECK_HOST_ITSELF; fi
+    if [[ "$WITH_HOST" == true ]]; then CHECK_HOST_ITSELF || CHECK_FAILURE=1; fi
     if [[ "$WITH_LXC" == true ]]; then CONTAINER_CHECK_START; fi
     if [[ "$WITH_VM" == true ]]; then VM_CHECK_START; fi
   fi
