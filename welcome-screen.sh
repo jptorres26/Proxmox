@@ -142,15 +142,20 @@ COMPACT_WELCOME_OUTPUT () {
   ' "$1"
 }
 
-# Welcome. Disk discovery is deliberately disabled: screenfetch/neofetch
-# otherwise call df across every mounted filesystem, and a dead NFS/CIFS
-# server can leave that syscall in uninterruptible kernel sleep. A login/MOTD
-# path must not probe remote storage or rely on a network reachability guess.
+# Welcome. Disk discovery is deliberately disabled: screenfetch, neofetch and
+# fastfetch otherwise call df across every mounted filesystem, and a dead
+# NFS/CIFS server can leave that syscall in uninterruptible kernel sleep. A
+# login/MOTD path must not probe remote storage or rely on a network
+# reachability guess.
 if [[ -f /usr/bin/screenfetch ]]; then
   echo && timeout 10 screenfetch -d '-disk' -o 'shell_type="bash"' && echo
 elif [[ -f /usr/bin/neofetch ]]; then
   echo
   timeout 10 neofetch --disable disk
+elif [[ -x /usr/bin/fastfetch ]]; then
+  # Debian 13 (Proxmox VE 9) packages fastfetch instead of neofetch.
+  echo
+  timeout 10 fastfetch --structure Title:Separator:OS:Host:Kernel:Uptime:Packages:Shell:CPU:Memory
 else
   echo
 fi

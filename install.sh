@@ -174,7 +174,7 @@ CL="\e[0m"
 
 #Header
 HEADER_INFO () {
-  clear
+  clear 2>/dev/null || true
   echo -e "\n \
       https://github.com/BassT23/Proxmox\n"
   cat <<'EOF'
@@ -362,6 +362,7 @@ STATUS () {
       echo -e "Status: ${RD:-}not present${CL:-}\n"
     fi
   fi
+  trap - EXIT
   if IS_INSTALLED; then exit 0; else exit 1; fi
 }
 
@@ -370,7 +371,7 @@ INFORMATION () {
     echo -e "\n${RD:-} --- ATTENTION! ---\n Because of name and directory changing, you will need an reboot of the node, after the update\n\n${BL:-} Do you want to proceed?${CL:-}"
     read -p " Type [Y/y] or Enter for yes - anything else will exit: " -r
       if ! [[ $REPLY =~ ^[Yy]$ || $REPLY = "" ]]; then
-        exit 1
+        exit 0
       fi
   fi
 }
@@ -550,7 +551,7 @@ INSTALL () {
     echo -e "${OR:-}Also want to install the Welcome-Screen?${CL:-}"
     read -p "Type [Y/y] or Enter for yes - anything else will exit: " -r
     if [[ $REPLY =~ ^[Yy]$ || $REPLY = "" ]]; then
-      WELCOME_SCREEN_INSTALL
+      WELCOME_SCREEN_INSTALL "$TEMP_FILES/welcome-screen.sh"
     fi
     rm -rf $TEMP_FOLDER || true
   fi
@@ -942,7 +943,7 @@ WELCOME_SCREEN () {
       echo -e "${OR:-} Welcome-Screen is not installed${CL:-}\n"
       read -p "Would you like to install it also? Type [Y/y] or Enter for yes - anything else will skip: " -r
       if [[ $REPLY =~ ^[Yy]$ || $REPLY = "" ]]; then
-        WELCOME_SCREEN_INSTALL
+        WELCOME_SCREEN_INSTALL "$TEMP_FOLDER/welcome-screen.sh"
       fi
     else
       echo -e "${OR:-}  Welcome-Screen is already installed${CL:-}\n"
@@ -962,28 +963,39 @@ ${BL:-} crontab file restored (old one backed up as crontab.bak)${CL:-}\n"
 }
 
 WELCOME_SCREEN_INSTALL () {
+  local source="${1:-$TEMP_FOLDER/welcome-screen.sh}" fetch_default=screenfetch fetch_tool
+  # Check the source before touching /etc/motd: release archives are nested,
+  # so the script is not always directly below $TEMP_FOLDER.
+  if [[ ! -f "$source" ]]; then
+    echo -e "${RD:-}Welcome-Screen source is missing: $source${CL:-}" >&2
+    return 1
+  fi
   if [[ -f /etc/motd ]];then mv /etc/motd /etc/motd.bak; fi
   touch /etc/motd
   cp /etc/crontab /etc/crontab.bak
-  cp $TEMP_FOLDER/welcome-screen.sh /etc/update-motd.d/01-welcome-screen
-  chmod +x /etc/update-motd.d/01-welcome-screen
+  install -m 0755 "$source" /etc/update-motd.d/01-welcome-screen
   if ! [[ -f $LOCAL_FILES/check-output ]]; then touch $LOCAL_FILES/check-output; fi
   if ! grep -Eq "check-updates\.sh|update -check" /etc/crontab; then
     echo "00 06   * * *   root RUN_FROM_CRON=true /usr/local/sbin/update -check >/dev/null 2>&1" >> /etc/crontab
   fi
-  # Fetch tool install (neofetch or screenfetch)
-  if ! command -v neofetch >/dev/null 2>&1 && ! command -v screenfetch >/dev/null 2>&1; then
+  # Optional system information tool. Debian 13 (Proxmox VE 9) no longer
+  # ships neofetch, so only offer it as the default where it exists.
+  if ! command -v neofetch >/dev/null 2>&1 && ! command -v screenfetch >/dev/null 2>&1 &&
+    ! command -v fastfetch >/dev/null 2>&1; then
+    apt-cache show neofetch >/dev/null 2>&1 && fetch_default=neofetch
     echo -e "${OR:-}  Install neofetch or screenfetch?${CL:-}"
-    read -r -p "  Type [N/n] or Enter for neofetch, [S/s] for screenfetch: " REPLY
-    if [[ $REPLY =~ ^[Ss]$ ]]; then
-      apt-get install screenfetch -y || true
-      echo -e "\n✅${GN:-} Welcome-Screen installed with screenfetch${CL:-}"
-      return 0
+    read -r -p "  Type [N/n] for neofetch, [S/s] for screenfetch, or Enter for $fetch_default: " REPLY
+    case "$REPLY" in
+      [Nn]) fetch_tool=neofetch ;;
+      [Ss]) fetch_tool=screenfetch ;;
+      *) fetch_tool=$fetch_default ;;
+    esac
+    if apt-get install -y "$fetch_tool"; then
+      echo -e "\n✅${GN:-} Welcome-Screen installed with $fetch_tool${CL:-}"
     else
-      apt-get install neofetch -y || true
-      echo -e "\n✅${GN:-} Welcome-Screen installed with neofetch${CL:-}"
-      return 0
+      echo -e "\n✅${GN:-} Welcome-Screen installed (${fetch_tool} is not available on this system)${CL:-}"
     fi
+    return 0
   else
     echo -e "\n✅${GN:-} Welcome-Screen installed successfully${CL:-}"
   fi
@@ -1030,15 +1042,15 @@ ${BL:-} crontab file restored (old one backed up as crontab.bak)${CL:-}\n"
 #Error/Exit
 set -e
 EXIT () {
-  EXIT_CODE=$?
-  # Install Finish
-  if  [[ $EXIT_CODE -lt 2 ]]; then
-    exit 0
-  elif [[ $EXIT_CODE != "0" ]]; then
-    rm -rf $TEMP_FOLDER || true
-    echo -e "❌${RD:-} Error during install --- Exit Code: $EXIT_CODE${CL:-}\n"
-    exit "$EXIT_CODE"
+  local exit_code=$?
+  trap - EXIT
+  # Report every failure. Mapping exit status 1 to 0 hid failed downloads,
+  # copies, and service setup from update.sh and the self-update job.
+  if [[ $exit_code -ne 0 ]]; then
+    rm -rf -- "$TEMP_FOLDER" 2>/dev/null || true
+    echo -e "❌${RD:-} Error during install --- Exit Code: $exit_code${CL:-}\n" >&2
   fi
+  exit "$exit_code"
 }
 
 # Exit Code
