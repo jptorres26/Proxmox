@@ -138,6 +138,23 @@ SANITIZE_NUMBER() {
   echo "$1" | tr -cd '0-9'
 }
 
+# Package-count commands executed inside guests (pct exec, SSH, or QGA).
+# Keep them single-quoted POSIX sh: Alpine and FreeBSD have no Bash.
+# - dnf/yum check-update exit 100 when updates exist and 0 when there are
+#   none; count package lines only (long names wrap onto a second line) and
+#   stop at the "Obsoleting Packages" section. Counting lines ending in
+#   " updates" missed every other repository, and grep -c exits 1 on zero.
+# - checkupdates (pacman-contrib) syncs a temporary database, so the count
+#   is current without modifying the guest; plain `pacman -Qu` only sees the
+#   last synced database.
+RPM_COUNT_AWK='/^Obsoleting/ {exit} NF == 3 {n++; p = 0; next} NF == 1 {p = 1; next} NF == 2 && p {n++; p = 0; next} {p = 0} END {print n + 0}'
+# shellcheck disable=SC2016 # expanded by the guest shell, not here
+DNF_COUNT_COMMAND='out=$(dnf -q check-update 2>/dev/null); rc=$?; if [ "$rc" -ne 0 ] && [ "$rc" -ne 100 ]; then exit "$rc"; fi; printf "%s\n" "$out" | awk '"'$RPM_COUNT_AWK'"
+# shellcheck disable=SC2016 # expanded by the guest shell, not here
+YUM_COUNT_COMMAND='out=$(yum -q check-update 2>/dev/null); rc=$?; if [ "$rc" -ne 0 ] && [ "$rc" -ne 100 ]; then exit "$rc"; fi; printf "%s\n" "$out" | awk '"'$RPM_COUNT_AWK'"
+# shellcheck disable=SC2016 # expanded by the guest shell, not here
+PACMAN_COUNT_COMMAND='if command -v checkupdates >/dev/null 2>&1; then out=$(checkupdates 2>/dev/null); rc=$?; if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then exit "$rc"; fi; else out=$(pacman -Qu 2>/dev/null); fi; if [ -z "$out" ]; then echo 0; else printf "%s\n" "$out" | wc -l; fi'
+
 # Validate a package count printed by a guest before any arithmetic touches
 # it. Bash evaluates the operands of [[ -gt ]] and (( )) as expressions,
 # including array subscripts, so guest output such as 'x[$(cmd)]' would run
@@ -991,7 +1008,7 @@ CHECK_CONTAINER () {
       PRINT_UPDATE_SPLIT "$NORMAL_APT_UPDATES" "$SECURITY_APT_UPDATES"
     fi
   elif [[ "$OS" =~ fedora ]]; then
-    if ! UPDATES=$(RUN_PCT_COMMAND "$CONTAINER" bash -c "dnf check-update | grep -Ec ' updates$'"); then
+    if ! UPDATES=$(RUN_PCT_COMMAND "$CONTAINER" sh -c "$DNF_COUNT_COMMAND"); then
       CHECK_CONTAINER_FAILURE "dnf check-update failed for LXC $CONTAINER"
       return
     fi
@@ -1005,7 +1022,7 @@ CHECK_CONTAINER () {
       printf '%s\n' "$CONTAINER_UPDATES"
     fi
   elif [[ "$OS" =~ archlinux ]]; then
-    if ! UPDATES=$(RUN_PCT_COMMAND "$CONTAINER" bash -c "pacman -Qu | wc -l"); then
+    if ! UPDATES=$(RUN_PCT_COMMAND "$CONTAINER" sh -c "$PACMAN_COUNT_COMMAND"); then
       CHECK_CONTAINER_FAILURE "pacman query failed for LXC $CONTAINER"
       return
     fi
@@ -1037,7 +1054,7 @@ CHECK_CONTAINER () {
       printf '%s\n' "$CONTAINER_UPDATES"
     fi
   else
-    if ! UPDATES=$(RUN_PCT_COMMAND "$CONTAINER" bash -c "yum -q check-update | wc -l"); then
+    if ! UPDATES=$(RUN_PCT_COMMAND "$CONTAINER" sh -c "$YUM_COUNT_COMMAND"); then
       CHECK_CONTAINER_FAILURE "yum check-update failed for LXC $CONTAINER"
       return
     fi
@@ -1386,7 +1403,7 @@ CHECK_VM () {
       # Checks only report reboot_required. Reboot execution belongs exclusively
       # to the update runtime and must never occur in this function.
     elif [[ "$OS" =~ Fedora ]]; then
-      UPDATES=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "dnf check-update | grep -Ec ' updates$'")
+      UPDATES=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "$DNF_COUNT_COMMAND")
       UPDATES=$(SANITIZE_NUMBER "$UPDATES")
       UPDATES=${UPDATES:-0}
       if [[ "$UPDATES" -gt 0 ]]; then
@@ -1394,7 +1411,7 @@ CHECK_VM () {
       fi
       [[ "$UPDATES" -gt 0 ]] && PRINT_UPDATE_TOTAL "$UPDATES"
     elif [[ "$OS" =~ Arch ]]; then
-      UPDATES=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "pacman -Qu | wc -l")
+      UPDATES=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "$PACMAN_COUNT_COMMAND")
       UPDATES=${UPDATES//[^0-9]/}
       UPDATES=${UPDATES:-0}
       if [[ "$UPDATES" -gt 0 ]]; then
@@ -1410,7 +1427,7 @@ CHECK_VM () {
       fi
       [[ "$UPDATES" -gt 0 ]] && PRINT_UPDATE_TOTAL "$UPDATES"
     elif [[ "$OS" =~ CentOS ]]; then
-      UPDATES=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "yum -q check-update | wc -l")
+      UPDATES=$(RUN_SSH_COMMAND "$IP" "$SSH_VM_PORT" "$USER" "$YUM_COUNT_COMMAND")
       UPDATES=$(SANITIZE_NUMBER "$UPDATES")
       UPDATES=${UPDATES:-0}
       if [[ "$UPDATES" -gt 0 ]]; then
@@ -1579,7 +1596,7 @@ CHECK_VM_QEMU () {
       [[ "$QEMU_APT_UPDATES" -gt 0 || "$REBOOT_REQUIRED" == true ]] && QEMU_APT_STATUS=updates_available
       STATUS_MODEL_RECORD "$VM" vm qga true "$OS" apt "$QEMU_APT_UPDATES" "$REBOOT_REQUIRED" "$QEMU_APT_STATUS" "" "" "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME" "$NORMAL_APT_UPDATES" "$SECURITY_APT_UPDATES"
     elif [[ "$OS" =~ Fedora ]]; then
-      QEMU_GUEST_EXEC "$VM" --timeout 120 -- bash -c "dnf check-update | grep -Ec ' updates$'"
+      QEMU_GUEST_EXEC "$VM" --timeout 120 -- sh -c "$DNF_COUNT_COMMAND"
       QEMU_COUNT_RESULT_OK "QEMU dnf check for VM $VM" || return 1
       UPDATES="$QEMU_EXEC_STDOUT"
       UPDATES=$(SANITIZE_NUMBER "$UPDATES")
@@ -1592,7 +1609,7 @@ CHECK_VM_QEMU () {
       [[ "$UPDATES" -gt 0 ]] && QEMU_DNF_STATUS=updates_available
       STATUS_MODEL_RECORD "$VM" vm qga true "$OS" dnf "$UPDATES" false "$QEMU_DNF_STATUS" "" "" "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME" null null
     elif [[ "$OS" =~ Arch ]]; then
-      QEMU_GUEST_EXEC "$VM" --timeout 120 -- bash -c "pacman -Qu | wc -l"
+      QEMU_GUEST_EXEC "$VM" --timeout 120 -- sh -c "$PACMAN_COUNT_COMMAND"
       QEMU_COUNT_RESULT_OK "QEMU pacman check for VM $VM" || return 1
       UPDATES="$QEMU_EXEC_STDOUT"
       UPDATES=$(SANITIZE_NUMBER "$UPDATES")
@@ -1618,7 +1635,7 @@ CHECK_VM_QEMU () {
       [[ "$UPDATES" -gt 0 ]] && QEMU_APK_STATUS=updates_available
       STATUS_MODEL_RECORD "$VM" vm qga true "$OS" apk "$UPDATES" false "$QEMU_APK_STATUS" "" "" "${STATUS_MODEL_NODE:-$HOSTNAME}" "$STATUS_MODEL_GUEST_NAME" null null
     elif [[ "$OS" =~ CentOS ]]; then
-      QEMU_GUEST_EXEC "$VM" --timeout 120 -- bash -c "yum -q check-update | wc -l"
+      QEMU_GUEST_EXEC "$VM" --timeout 120 -- sh -c "$YUM_COUNT_COMMAND"
       QEMU_COUNT_RESULT_OK "QEMU yum check for VM $VM" || return 1
       UPDATES="$QEMU_EXEC_STDOUT"
       UPDATES=$(SANITIZE_NUMBER "$UPDATES")
