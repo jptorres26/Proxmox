@@ -1025,7 +1025,7 @@ body:has(#login-screen.open) .nav-scrim { display:none !important; }
     decorateOverviewIcons();
     bootstrap();
   </script>
-</main><script>
+<script>
     let loginVersionTimer=null;
     function loginVersionText(data){
       const version=data?.installed||'version unavailable';
@@ -1060,7 +1060,7 @@ body:has(#login-screen.open) .nav-scrim { display:none !important; }
     }
     scheduleUpdaterVersionCheck=()=>{clearTimeout(versionStartupTimer);clearTimeout(versionRetryTimer);loadPublicVersion()};
     loadPublicVersion();
-  </script></main><script>
+  </script><script>
 (() => {
   const modal=document.getElementById('schedule-modal'),form=document.getElementById('schedule-form'),list=document.getElementById('scheduler-list'),empty=document.getElementById('scheduler-empty'),message=document.getElementById('scheduler-message');
   if(!modal||!form)return;
