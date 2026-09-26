@@ -89,13 +89,9 @@ READ_WRITE_CONFIG () {
   STOPPED=$(awk -F'"' '/^CHECK_STOPPED_CONTAINER=/ {print $2}' "$CONFIG_FILE")
   EXCLUDED=$(awk -F'"' '/^EXCLUDE_UPDATE_CHECK=/ {print $2}' "$CONFIG_FILE")
   ONLY=$(awk -F'"' '/^ONLY_UPDATE_CHECK=/ {print $2}' "$CONFIG_FILE")
-  if [[ -f "$LOCAL_FILES/tag-filter.sh" ]]; then
-    # shellcheck disable=SC1091
-    . "$LOCAL_FILES/tag-filter.sh"
-    if declare -f apply_only_exclude_tags >/dev/null 2>&1; then
-      apply_only_exclude_tags ONLY EXCLUDED
-    fi
-  fi
+  # The notice only needs to know whether a filter is set. Expanding tags
+  # (pvesh, /etc/pve) at every SSH login could hang the login when pmxcfs
+  # is blocked, exactly when an administrator needs to get in.
   if [[ $ONLY != "" ]]; then
     echo -e "${OR}Only is set. Not all machines are checked.${CL}\n"
   elif [[ $ONLY == "" && $EXCLUDED != "" ]]; then

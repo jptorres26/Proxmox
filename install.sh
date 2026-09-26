@@ -51,7 +51,7 @@ DOWNLOAD_FILE() {
   mkdir -p "$(dirname "$destination")" || return 1
   temporary=$(mktemp "${destination}.download.XXXXXX") || return 1
   headers=$(mktemp "${destination}.headers.XXXXXX") || { rm -f -- "$temporary"; return 1; }
-  http_code=$(curl -4 -sS -fSL --retry 0 --connect-timeout 5 --max-time 120 \
+  http_code=$(curl -4 -sS -fSL --proto '=https' --proto-redir '=https' --retry 0 --connect-timeout 5 --max-time 120 \
     -D "$headers" -o "$temporary" -w '%{http_code}' "$url" 2>/dev/null) || {
     if [[ "$http_code" == 429 ]]; then
       retry_after=$(awk 'BEGIN{IGNORECASE=1} /^Retry-After:/ {sub(/^[^:]*:[[:space:]]*/, ""); print; exit}' "$headers")
@@ -76,6 +76,13 @@ DOWNLOAD_FILE() {
       tar -tzf "$temporary" >/dev/null 2>&1 || { rm -f -- "$temporary" "$headers" "$destination"; echo "Downloaded archive failed validation." >&2; return 1; }
       listing=$(tar -tzf "$temporary") || { rm -f -- "$temporary" "$headers" "$destination"; echo "Downloaded archive failed validation." >&2; return 1; }
       grep -Eq '(^|/)update\.sh$' <<<"$listing" || { rm -f -- "$temporary" "$headers" "$destination"; echo "Downloaded archive does not contain update.sh." >&2; return 1; }
+      # Regular files and directories only, all inside the archive root.
+      if grep -Eq '(^/|(^|/)\.\.(/|$))' <<<"$listing" ||
+        ! tar -tvzf "$temporary" | awk '{type = substr($1, 1, 1)} type != "-" && type != "d" {bad = 1} END {exit bad}'; then
+        rm -f -- "$temporary" "$headers" "$destination"
+        echo "Downloaded archive contains unsafe entries." >&2
+        return 1
+      fi
       ;;
   esac
   chmod 0600 "$temporary"
@@ -376,30 +383,41 @@ INFORMATION () {
   fi
 }
 
+# Point the Welcome Screen check at the current CLI. Only our own lines are
+# replaced; restoring /etc/crontab.bak (a snapshot from the Welcome Screen
+# install) discarded every crontab change made since then.
+CRONTAB_SET_CHECK_ENTRY () {
+  cp -p /etc/crontab "/etc/crontab.bak.$(date +%Y%m%d-%H%M%S)" || return 1
+  sed -i '\|check-updates\.sh|d; \|update -check|d' /etc/crontab || return 1
+  echo "00 06   * * *   root RUN_FROM_CRON=true /usr/local/sbin/update -check >/dev/null 2>&1" >> /etc/crontab
+}
+
 OLD_FILESYSTEM_CHECK () {
   if [[ -d /root/Proxmox-Updater/ ]]; then
     mv /root/Proxmox-Updater/ $LOCAL_FILES/
     if [[ -f /etc/update-motd.d/01-welcome-screen ]]; then
-      mv /etc/crontab /etc/crontab.bak_name_change
-      cp /etc/crontab.bak /etc/crontab
-      echo "00 07,19 * * *  root    $LOCAL_FILES/check-updates.sh" >> /etc/crontab
+      CRONTAB_SET_CHECK_ENTRY
     fi
   fi
   if [[ -d /root/Ultimative-Updater/ ]]; then
     if [[ -f /etc/update-motd.d/01-welcome-screen ]]; then
-      mv /etc/crontab /etc/crontab.bak_name_change
-      cp /etc/crontab.bak /etc/crontab
-      echo "00 07,19 * * *  root    $LOCAL_FILES/check-updates.sh" >> /etc/crontab
+      CRONTAB_SET_CHECK_ENTRY
     fi
   fi
-  if [ -d "/root/Ultimative-Update-Scripts" ]; then
-    echo -e "${RD:-}Ultimate-Updater has changed directory's, so the old directory\n\
-/root/Update-Scripts will be delete.${CL:-}\n\
+  if [[ -d "/root/Ultimative-Update-Scripts" ]]; then
+    # It used to delete a different directory and re-run the installer, so
+    # the prompt came back forever (and a non-interactive run skipped the
+    # update with exit 0).
+    if [[ ! -t 0 ]]; then
+      echo "Remove the old directory /root/Ultimative-Update-Scripts, then run the update again." >&2
+      return 2
+    fi
+    echo -e "${RD:-}Ultimate-Updater has changed directories, so the old directory\n\
+/root/Ultimative-Update-Scripts will be deleted.${CL:-}\n\
 ${OR:-}Is it OK for you, or want to backup your files first?${CL:-}\n"
     read -p "Type [Y/y] for DELETE - anything else will exit: " -r
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-      rm -rf /root/Update-Proxmox-Scripts || true
-      DOWNLOAD_INSTALLER "$SERVER_URL/install.sh" update
+      rm -rf -- /root/Ultimative-Update-Scripts
     else
       exit 0
     fi
@@ -435,10 +453,12 @@ INSTALL () {
     mkdir -p $LOCAL_FILES/exit
     mkdir -p $LOCAL_FILES/VMs
     mkdir -p $LOCAL_FILES/scripts.d/000
-    # Download latest release
-    if ! [[ -d $TEMP_FOLDER ]];then mkdir $TEMP_FOLDER; fi
+    # Download latest release into an empty folder: a stale extracted tree
+    # could be picked up by SET_TEMP_FILES.
+    rm -rf -- "$TEMP_FOLDER"
+    mkdir -p -- "$TEMP_FOLDER" || exit 1
       DOWNLOAD_ARCHIVE || exit 1
-      tar -zxf "$TEMP_FOLDER/ultimate-updater.tar.gz" -C "$TEMP_FOLDER" || exit 1
+      tar --no-same-owner -zxf "$TEMP_FOLDER/ultimate-updater.tar.gz" -C "$TEMP_FOLDER" || exit 1
       rm -f -- "$TEMP_FOLDER/ultimate-updater.tar.gz"
       SET_TEMP_FILES || exit 1
     # Copy files
@@ -572,7 +592,7 @@ UPDATE () {
     # Download files
     if ! [[ -d $TEMP_FOLDER ]]; then mkdir $TEMP_FOLDER; fi
     DOWNLOAD_ARCHIVE || return 1
-    tar -zxf "$TEMP_FOLDER/ultimate-updater.tar.gz" -C "$TEMP_FOLDER" || return 1
+    tar --no-same-owner -zxf "$TEMP_FOLDER/ultimate-updater.tar.gz" -C "$TEMP_FOLDER" || return 1
     rm -f -- "$TEMP_FOLDER/ultimate-updater.tar.gz"
     SET_TEMP_FILES || return 1
     installed_version=$(awk -F'"' '/^VERSION=/ {print $2; exit}' "$LOCAL_FILES/update.sh" 2>/dev/null || true)
@@ -955,7 +975,7 @@ WELCOME_SCREEN () {
         # delete crontab entry
         sed -i '\|update -check >/dev/null 2>&1|d' /etc/crontab
         echo -e "\n${BL:-} Welcome-Screen uninstalled${CL:-}\n\
-${BL:-} crontab file restored (old one backed up as crontab.bak)${CL:-}\n"
+${BL:-} crontab check entry removed${CL:-}\n"
       fi
     fi
     rm -rf $TEMP_FOLDER || true
@@ -1007,20 +1027,30 @@ UNINSTALL () {
     echo -e "${RD:-}Really want to remove The Ultimate Updater?${CL:-}"
     read -p "Type [Y/y] for yes - anything else will exit: " -r
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-      rm /usr/local/sbin/update
+      rm -f /usr/local/sbin/update
       systemctl disable --now "$WEB_SERVICE_NAME" || true
       rm -f "$WEB_SERVICE_PATH"
+      # Scheduler timers kept firing a missing CLI; the CLI links dangled.
+      local timer
+      for timer in /etc/systemd/system/ultimate-updater-schedule-*.timer; do
+        [[ -e "$timer" ]] && { systemctl disable --now "${timer##*/}" || true; }
+      done
+      rm -f /etc/systemd/system/ultimate-updater-schedule-*.timer \
+        /etc/systemd/system/ultimate-updater-schedule-*.service \
+        /usr/local/sbin/ultimate-updater /usr/local/sbin/ultimate-updater-web-auth
       systemctl daemon-reload
-      rm -r $LOCAL_FILES
+      rm -r -- "$LOCAL_FILES"
+      # Remove only our check entry. Restoring /etc/crontab.bak discarded all
+      # later crontab changes, and failed under set -e when it was missing,
+      # leaving no /etc/crontab at all.
+      cp -p /etc/crontab "/etc/crontab.uninstall.$(date +%Y%m%d-%H%M%S)"
+      sed -i '\|/usr/local/sbin/update -check|d; \|check-updates\.sh|d' /etc/crontab
       if [[ -f /etc/update-motd.d/01-welcome-screen ]]; then
         rm -rf /etc/update-motd.d/01-welcome-screen
         rm -rf /etc/motd
         if [[ -f /etc/motd.bak ]]; then
           mv /etc/motd.bak /etc/motd
         fi
-        mv /etc/crontab /etc/crontab.bak2
-        mv /etc/crontab.bak /etc/crontab
-        mv /etc/crontab.bak2 /etc/crontab.bak
         echo -e "${BL:-}Should fetch be uninstalled also?${CL:-}"
         read -p "Type [Y/y] for yes - anything else will skip: " -r
         if [[ $REPLY =~ ^[Yy]$ ]]; then
@@ -1031,7 +1061,7 @@ UNINSTALL () {
         fi
       fi
       echo -e "\n\n${BL:-} The Ultimate Updater has gone${CL:-}\n\
-${BL:-} crontab file restored (old one backed up as crontab.bak)${CL:-}\n"
+${BL:-} crontab check entry removed (previous file saved as /etc/crontab.uninstall.*)${CL:-}\n"
       exit 0
     fi
   else

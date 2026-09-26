@@ -73,4 +73,12 @@ if grep -Fq 'Normal updates:' <<<"$actual" ||
   echo 'verbose update labels remain in compact welcome output' >&2
   exit 1
 fi
+# The login path never expands tags (pvesh, /etc/pve): a blocked pmxcfs
+# hung SSH logins.
+config_reader=$(sed -n '/^READ_WRITE_CONFIG () {/,/^}/p' "$ROOT_DIR/welcome-screen.sh")
+[[ -n "$config_reader" ]]
+if grep -v '^[[:space:]]*#' <<< "$config_reader" | grep -Eq 'apply_only_exclude_tags|pvesh|/etc/pve'; then
+  echo 'the welcome screen reads cluster state at login' >&2
+  exit 1
+fi
 printf '%s\n' 'welcome compact output tests: PASS'
