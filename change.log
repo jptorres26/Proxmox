@@ -15,6 +15,9 @@ Improved:
 - mail is sent through sendmail with explicit headers, so GNU mailutils and s-nail work; several recipients and "Name <address>" senders are accepted
 - the Web UI settings writer keeps the file format the scripts read, the settings form shows what changed, schedules show their own last run, TLS certificates are reloaded after renewal, and timed-out commands stop their whole process group
 - `job-runner.sh list` reads each state file once (about 3x faster with 50 jobs)
+- Web UI: a 56 px top bar with the pages as visible tabs replaces the tall header and hidden menu on desktop, the overview is one KPI strip, a missing figure shows a dash instead of the long word "Unknown" (which broke mid-word on phones), muted text is lighter, and Settings has a sticky bar with the unsaved-change count, Discard and Save
+- Web UI Systems list: search box and filter chips (needs attention, updates available, unreachable, reboot required) with counts, and the Jobs bar stays docked at the bottom while you scroll
+- Web UI Settings: a section rail that follows you, switches instead of checkboxes, units inside number fields, and the reason shown next to a field that needs fixing
 - user scripts, extras and QGA commands run from a private mktemp directory in the guest, which is removed afterwards
 - self-updates keep edited `exit/*.sh` hooks and put the new default next to them as `*.dist`
 

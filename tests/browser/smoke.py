@@ -226,6 +226,20 @@ def exercise_pages(page, url):
     # The probe must render as literal text, never as markup.
     expect(targets).to_contain_text("web<img")
 
+    # Filter chips and search narrow the list; the KPI counts keep every system.
+    total = page.locator("#total").inner_text()
+    page.locator('.chip[data-filter="updates"]').click()
+    expect(page.locator('.chip[data-filter="updates"]')).to_have_attribute("aria-pressed", "true")
+    expect(page.locator("#targets .filtered-panel")).to_be_visible()
+    assert page.locator("#total").inner_text() == total
+    page.locator("#systems-search").fill("no-such-system-xyz")
+    expect(page.locator("#targets")).to_contain_text("No systems match")
+    page.locator("#systems-clear").click()
+    expect(page.locator('.chip[data-filter="all"]')).to_have_attribute("aria-pressed", "true")
+    expect(page.locator("#systems-search")).to_have_value("")
+    expect(page.locator("#targets .node-group").first).to_be_visible()
+    expect(page.locator("#targets")).to_contain_text("db")
+
     for route, section in (("settings", "#settings-page"), ("scheduler", "#scheduler-page"),
                            ("overview", "#overview-page")):
         link = page.locator(f'a[data-page="{route}"]').first
@@ -293,7 +307,27 @@ def exercise_settings(page, url, config_file):
     recipient.fill("someone@example.org")
     form.locator("#config-close").click()
     expect(message).to_have_text("Changes discarded.")
+    # The bar counts unsaved changes and resets after Discard.
+    dirty = page.locator("#config-dirty")
+    expect(dirty).to_have_text("No unsaved changes")
+    page.locator('#config-form [data-key="DEBUG"]').first.click()
+    expect(dirty).to_have_text("1 unsaved change")
+    form.locator("#config-close").click()
+    expect(dirty).to_have_text("No unsaved changes")
     expect(form.locator('input[data-key="EMAIL_USER"]')).to_have_value("ops@example.org")
+
+    # Section rail jumps to a group; a bad number shows its message beside the field.
+    page.locator('.settings-rail a:has-text("Backup & safety")').click()
+    expect(page.locator("#settings-group-backup-safety")).to_be_in_viewport()
+    keep = form.locator('input[data-key="KEEP_SNAPSHOTS"]')
+    keep.fill("0")
+    expect(keep).to_have_attribute("aria-invalid", "true")
+    expect(keep.locator("xpath=ancestor::label[1]")).to_contain_text("Must be at least 1.")
+    expect(dirty).to_contain_text("1 field needs fixing")
+    keep.fill("3")
+    expect(keep).not_to_have_attribute("aria-invalid", "true")
+    form.locator("#config-close").click()
+    expect(dirty).to_have_text("No unsaved changes")
 
     recipient = form.locator('input[data-key="EMAIL_USER"]')
     recipient.fill('root" DEBUG="true')
