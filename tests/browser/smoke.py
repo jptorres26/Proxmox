@@ -293,6 +293,13 @@ def exercise_settings(page, url, config_file):
     recipient.fill("someone@example.org")
     form.locator("#config-close").click()
     expect(message).to_have_text("Changes discarded.")
+    # The bar counts unsaved changes and resets after Discard.
+    dirty = page.locator("#config-dirty")
+    expect(dirty).to_have_text("No unsaved changes")
+    page.locator('#config-form [data-key="DEBUG"]').first.click()
+    expect(dirty).to_have_text("1 unsaved change")
+    form.locator("#config-close").click()
+    expect(dirty).to_have_text("No unsaved changes")
     expect(form.locator('input[data-key="EMAIL_USER"]')).to_have_value("ops@example.org")
 
     recipient = form.locator('input[data-key="EMAIL_USER"]')
